@@ -1,0 +1,11 @@
+node_modules/
+services/companion-server/.venv/
+services/companion-server/venv/
+__pycache__/
+data/
+services/companion-server/data/
+apps/soul-studio-h5/build/
+apps/soul-studio-h5/dist/
+.DS_Store
+.env
+*.log
