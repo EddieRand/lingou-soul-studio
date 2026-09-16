@@ -1,58 +1,61 @@
-# services/companion-server/app/api/hardware.py
+"""Authenticated browser-side hardware simulation endpoints."""
+
 import subprocess
-import sys
-from pathlib import Path
 
-project_root = Path(__file__).parent.parent.parent.parent
-sys.path.insert(0, str(project_root))
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, ConfigDict
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
-
+from app.api.auth import get_current_user
+from app.api.dev_tools import require_dev_tools
+from app.api.ownership import current_user_id, owned_base_or_404
 from app.core.response_engine import generate_touch_response
 from app.core.voice_player import speak
-from data.store import get_base, get_figure
+from data.store import figure_storage_key, get_figure
+
 
 router = APIRouter()
 
 
 class SimulateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     base_id: str
     event_type: str
 
 
 @router.post("/simulate")
-def simulate_hardware(req: SimulateRequest):
-    """
-    Simulate a hardware touch event.
-    Generates reply + plays audio via tts_adapter (volcano → system_say).
-    """
-    response = generate_touch_response(req.base_id, req.event_type)
+def simulate_hardware(
+    request: SimulateRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    require_dev_tools()
+    owner_user_id = current_user_id(current_user)
+    owned_base_or_404(request.base_id, owner_user_id)
+    response = generate_touch_response(
+        request.base_id,
+        request.event_type,
+        owner_user_id=owner_user_id,
+    )
     if not response:
-        raise HTTPException(status_code=404, detail="Base or active figure not found")
+        raise HTTPException(status_code=404, detail="资源不存在或不可访问")
 
-    # Play audio for the touch response
     figure_id = response.get("figure_id")
-    base = get_base(req.base_id)
-    if figure_id and base:
-        figure = get_figure(figure_id)
+    if figure_id:
+        figure = get_figure(str(figure_id), user_id=owner_user_id)
         if figure:
-            voice_profile = figure.get("voice_profile", {})
-            soul_profile = figure.get("soul_profile", {})
             speak(
                 text=response.get("reply", ""),
-                voice_profile=voice_profile,
-                figure_id=figure_id,
+                voice_profile=figure.get("voice_profile", {}),
+                figure_id=figure_storage_key(owner_user_id, str(figure_id)),
                 async_mode=True,
-                soul_profile=soul_profile,
+                soul_profile=figure.get("soul_profile", {}),
             )
-
     return response
 
 
 @router.get("/system-voices")
 def get_system_voices():
-    """Return list of macOS say available voice names."""
+    require_dev_tools()
     try:
         result = subprocess.run(
             ["say", "-v", "?"],
@@ -60,14 +63,13 @@ def get_system_voices():
             text=True,
             timeout=10,
         )
-        lines = result.stdout.strip().split("\n")
         voices = []
-        for line in lines:
+        for line in result.stdout.strip().split("\n"):
             parts = line.split()
-            if parts:
-                voice_name = parts[0]
-                if voice_name not in ("Alex", "Alice", "Alva", "Zarvox", "Victoria", "Agnes", "Kathy"):
-                    voices.append(voice_name)
+            if parts and parts[0] not in (
+                "Alex", "Alice", "Alva", "Zarvox", "Victoria", "Agnes", "Kathy"
+            ):
+                voices.append(parts[0])
         return voices
     except Exception:
         return ["Tingting", "Mei-Jia", "Yue", "Sin-ji", "Tingting"]

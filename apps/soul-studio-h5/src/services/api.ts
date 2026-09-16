@@ -1,22 +1,100 @@
 // services/api.ts - Frontend API service
 
-const BASE = '/api';
+import { getStoredToken, invalidateStoredSession } from './authSession'
 
-async function request<T>(path: string, opts?: RequestInit): Promise<T> {
-  const token = localStorage.getItem('lingou_token')
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`
+const BASE = '/api'
+
+type RequestOptions = RequestInit & { authenticated?: boolean }
+
+export class ApiError extends Error {
+  status: number
+  code?: string
+
+  constructor(message: string, status: number, code?: string) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.code = code
   }
-  const res = await fetch(`${BASE}${path}`, {
-    headers: { ...headers, ...(opts?.headers as Record<string, string>) },
-    ...opts,
-  });
+}
+
+export async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
+  const { authenticated = true, ...fetchOptions } = opts
+  const requestToken = authenticated ? getStoredToken() : null
+  const headers = new Headers(fetchOptions.headers)
+  const body = fetchOptions.body
+
+  if (requestToken) {
+    headers.set('Authorization', `Bearer ${requestToken}`)
+  }
+  if (
+    body !== undefined
+    && !(body instanceof FormData)
+    && !(body instanceof URLSearchParams)
+    && !headers.has('Content-Type')
+  ) {
+    headers.set('Content-Type', 'application/json')
+  }
+
+  const res = await fetch(`${BASE}${path}`, { ...fetchOptions, headers })
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: 'Unknown error' }));
-    throw new Error(err.detail || `HTTP ${res.status}`);
+    if (res.status === 401 && authenticated) {
+      invalidateStoredSession(requestToken)
+    }
+    const errorBody = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }))
+    const detail = typeof errorBody.detail === 'string'
+      ? errorBody.detail
+      : errorBody.detail?.message
+    throw new ApiError(
+      detail || `HTTP ${res.status}`,
+      res.status,
+      errorBody.error_code || errorBody.detail?.code,
+    )
   }
-  return res.json();
+  if (res.status === 204) {
+    return undefined as T
+  }
+  return res.json()
+}
+
+async function requestAudio(
+  path: string,
+  opts: RequestOptions = {},
+): Promise<VoicePreviewAudio> {
+  const { authenticated = true, ...fetchOptions } = opts
+  const requestToken = authenticated ? getStoredToken() : null
+  const headers = new Headers(fetchOptions.headers)
+  if (requestToken) {
+    headers.set('Authorization', `Bearer ${requestToken}`)
+  }
+  if (fetchOptions.body !== undefined && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
+  }
+
+  const response = await fetch(`${BASE}${path}`, { ...fetchOptions, headers })
+  if (!response.ok) {
+    if (response.status === 401 && authenticated) {
+      invalidateStoredSession(requestToken)
+    }
+    const body = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }))
+    const detail = typeof body.detail === 'string'
+      ? body.detail
+      : body.detail?.message
+    throw new ApiError(
+      detail || `HTTP ${response.status}`,
+      response.status,
+      body.error_code || body.detail?.code,
+    )
+  }
+
+  return {
+    blob: await response.blob(),
+    engine: response.headers.get('X-Lingou-Audio-Engine') || 'unknown',
+    source: response.headers.get('X-Lingou-Audio-Source') || 'synthesized',
+    speaker: response.headers.get('X-Lingou-Voice-Speaker') || '',
+    synthesizedAt: response.headers.get('X-Lingou-Audio-Synthesized-At') || '',
+    transferredAt: new Date().toISOString(),
+  }
 }
 
 // ============== Auth ==============
@@ -28,17 +106,38 @@ export interface Token {
   username: string
 }
 
-export const apiAuth = {
-  wechatLogin: () =>
-    request<Token>('/auth/wechat-login', {
-      method: 'POST',
-      body: JSON.stringify({}),
-    }),
+export interface AuthUser {
+  user_id: string
+  username: string
+  email: string
+  created_at: string
+}
 
-  appleLogin: () =>
-    request<Token>('/auth/apple-login', {
+export interface WebSocketTicket {
+  ticket: string
+  expires_in: number
+}
+
+export const apiAuth = {
+  login: (username: string, password: string) =>
+    request<Token>('/auth/login', {
       method: 'POST',
-      body: JSON.stringify({}),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ username, password }),
+      authenticated: false,
+    }),
+  register: (username: string, email: string, password: string) =>
+    request<AuthUser>('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ username, email, password }),
+      authenticated: false,
+    }),
+  verify: () => request<AuthUser>('/auth/verify'),
+  logout: () => request<{ message: string }>('/auth/logout', { method: 'POST' }),
+  createWebSocketTicket: (base_id: string) =>
+    request<WebSocketTicket>('/auth/ws-ticket', {
+      method: 'POST',
+      body: JSON.stringify({ base_id }),
     }),
 }
 
@@ -48,7 +147,6 @@ export type BindingStatus = 'unbound' | 'bound_to_current_user' | 'bound_to_othe
 
 export interface BaseProfile {
   base_id: string;
-  bound_user_id: string | null;
   active_figure_id: string | null;
   status: string;
   created_at: string;
@@ -60,8 +158,9 @@ export interface BindResult {
   success: boolean;
   base_id?: string;
   binding_status?: BindingStatus;
-  error_code?: string;
-  message?: string;
+  newly_bound?: boolean;
+  base?: BaseProfile;
+  figure?: FigureProfile | null;
 }
 
 export interface UnbindResult {
@@ -69,79 +168,36 @@ export interface UnbindResult {
   binding_status: 'unbound';
 }
 
-// Mock 数据 - 开发期使用
-const MOCK_BASE_ID = 'BASE-001'
+export interface BaseDetail {
+  base: BaseProfile;
+  figure: FigureProfile | null;
+}
 
 export const apiBases = {
-  create: (base_id: string, bound_user_id?: string) =>
-    request<BaseProfile>('/bases', {
+  list: () => request<BaseDetail[]>('/bases'),
+
+  createTestBase: (base_id: string) =>
+    request<BaseDetail>('/bases/test-bases', {
       method: 'POST',
-      body: JSON.stringify({ base_id, bound_user_id }),
+      body: JSON.stringify({ base_id }),
     }),
 
   get: (base_id: string) =>
-    request<{ base: BaseProfile; figure: any }>(`/bases/${base_id}`),
+    request<BaseDetail>(`/bases/${encodeURIComponent(base_id)}`),
 
-  // 旧版 bind（保留兼容）
-  bindLegacy: (base_id: string, bound_user_id: string) =>
-    request<BaseProfile>(`/bases/${base_id}/bind`, {
+  bind: (params: { qr_token: string }) =>
+    request<BindResult>('/bases/pair', {
       method: 'POST',
-      body: JSON.stringify({ bound_user_id }),
+      body: JSON.stringify(params),
     }),
 
-  // 新版 bind - 扫码绑定（第一版 mock，函数签名预留真实接口）
-  bind: async (params: { base_id?: string; qr_token: string; user_id: string }): Promise<BindResult> => {
-    // TODO: 接真实后端 POST /api/bases/bind-with-qr
-    // Mock 实现
-    return new Promise((resolve) => {
-      setTimeout(() => {
-        // 根据 qr_token 模拟不同结果
-        if (params.qr_token === 'VALID_QR_001') {
-          resolve({
-            success: true,
-            base_id: MOCK_BASE_ID,
-            binding_status: 'bound_to_current_user',
-          })
-        } else if (params.qr_token === 'INVALID_QR') {
-          resolve({
-            success: false,
-            error_code: 'INVALID_QR_CODE',
-            message: '二维码无效',
-          })
-        } else if (params.qr_token === 'ALREADY_BOUND_QR') {
-          resolve({
-            success: false,
-            error_code: 'BASE_ALREADY_BOUND',
-            message: '该底座已绑定其他账号',
-          })
-        } else {
-          // 默认成功
-          resolve({
-            success: true,
-            base_id: MOCK_BASE_ID,
-            binding_status: 'bound_to_current_user',
-          })
-        }
-      }, 500)
-    })
-  },
-
-  // 解绑底座（第一版 mock，函数签名预留真实接口）
-  unbind: async (_params: { base_id: string; user_id: string }): Promise<UnbindResult> => {
-    // TODO: 接真实后端 POST /api/bases/unbind
-    // Mock 实现
-    return new Promise((resolve) => {
-      setTimeout(() => {
-        resolve({
-          success: true,
-          binding_status: 'unbound',
-        })
-      }, 300)
-    })
-  },
+  unbind: (params: { base_id: string }) =>
+    request<UnbindResult>(`/bases/${encodeURIComponent(params.base_id)}/unbind`, {
+      method: 'POST',
+    }),
 
   setActiveFigure: (base_id: string, figure_id: string) =>
-    request<BaseProfile>(`/bases/${base_id}/active-figure`, {
+    request<BaseDetail>(`/bases/${encodeURIComponent(base_id)}/active-figure`, {
       method: 'POST',
       body: JSON.stringify({ figure_id }),
     }),
@@ -170,9 +226,13 @@ export interface Recommendation {
 }
 
 export interface CharacterProfile {
-  name: string;
-  archetype: string;
+  name?: string;
+  character_name?: string;
+  archetype?: string;
+  one_line?: string;
   background: string;
+  speech_style?: string;
+  address_user_as?: string;
   catchphrases: string[];
   signature_lines: string[];
   taboos: string[];
@@ -230,7 +290,7 @@ export const apiFigures = {
     return request<FigureProfile[]>('/figures')
   },
   get: (figure_id: string) => {
-    return request<FigureProfile>(`/figures/${figure_id}`)
+    return request<FigureProfile>(`/figures/${encodeURIComponent(figure_id)}`)
   },
   create: (data: any) => {
     return request<FigureProfile>('/figures', {
@@ -239,33 +299,84 @@ export const apiFigures = {
     })
   },
   update: (figure_id: string, data: any) => {
-    return request<FigureProfile>(`/figures/${figure_id}`, {
+    return request<FigureProfile>(`/figures/${encodeURIComponent(figure_id)}`, {
       method: 'PUT',
       body: JSON.stringify(data),
     })
   },
   delete: (figure_id: string) => {
-    return request<{ success: boolean }>(`/figures/${figure_id}`, { method: 'DELETE' })
+    return request<{ success: boolean }>(`/figures/${encodeURIComponent(figure_id)}`, { method: 'DELETE' })
   },
   saveCharacter: (figure_id: string, character_profile: CharacterProfile) => {
-    return request<FigureProfile>(`/figures/${figure_id}/character`, {
+    return request<FigureProfile>(`/figures/${encodeURIComponent(figure_id)}/character`, {
       method: 'PUT',
       body: JSON.stringify({ character_profile }),
     })
   },
   simulateAbsence: (figure_id: string, hours: number) => {
-    return request<FigureProfile>(`/figures/${figure_id}/simulate-absence`, {
+    return request<FigureProfile>(`/figures/${encodeURIComponent(figure_id)}/simulate-absence`, {
       method: 'POST',
       body: JSON.stringify({ hours }),
     })
   },
   boostRelationship: (figure_id: string, params?: { points?: number; level?: string; streak_days?: number }) => {
-    return request<FigureProfile>(`/figures/${figure_id}/boost-relationship`, {
+    return request<FigureProfile>(`/figures/${encodeURIComponent(figure_id)}/boost-relationship`, {
       method: 'POST',
       body: JSON.stringify(params || {}),
     })
   },
 };
+
+export interface MemoryRecord {
+  memory_id: string
+  content: string
+  status: 'pending' | 'confirmed'
+  source: 'model' | 'user'
+  source_turn_id: string | null
+  created_at: string
+  updated_at: string
+  confirmed_at?: string
+}
+
+export interface MemoryCollection {
+  figure_id: string
+  confirmed_facts: MemoryRecord[]
+  candidates: MemoryRecord[]
+  confirmed_limit: number
+  revision: number
+  updated_at: string | null
+}
+
+export const apiMemories = {
+  list: (figure_id: string) =>
+    request<MemoryCollection>(`/figures/${encodeURIComponent(figure_id)}/memories`),
+  create: (figure_id: string, content: string) =>
+    request<{ memory: MemoryRecord; created: boolean }>(
+      `/figures/${encodeURIComponent(figure_id)}/memories`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ content }),
+      },
+    ),
+  confirm: (figure_id: string, memory_id: string) =>
+    request<{ memory: MemoryRecord }>(
+      `/figures/${encodeURIComponent(figure_id)}/memories/${encodeURIComponent(memory_id)}/confirm`,
+      { method: 'POST' },
+    ),
+  update: (figure_id: string, memory_id: string, content: string) =>
+    request<{ memory: MemoryRecord }>(
+      `/figures/${encodeURIComponent(figure_id)}/memories/${encodeURIComponent(memory_id)}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ content }),
+      },
+    ),
+  delete: (figure_id: string, memory_id: string) =>
+    request<void>(
+      `/figures/${encodeURIComponent(figure_id)}/memories/${encodeURIComponent(memory_id)}`,
+      { method: 'DELETE' },
+    ),
+}
 
 // ============== Souls/Archetypes ==============
 
@@ -334,15 +445,32 @@ export const apiHardware = {
   getSystemVoices: () => request<string[]>('/hardware/system-voices'),
 };
 
+// ============== Dialogue / ASR ==============
+
+export const apiDialogue = {
+  getState: (base_id: string) =>
+    request<any>(`/dialogue/state?base_id=${encodeURIComponent(base_id)}`),
+  sendText: (base_id: string, text: string) =>
+    request<any>('/dialogue/text', {
+      method: 'POST',
+      body: JSON.stringify({ base_id, text }),
+    }),
+  getLogs: (figure_id: string, limit = 10) =>
+    request<any[]>(
+      `/dialogue/logs?figure_id=${encodeURIComponent(figure_id)}&limit=${encodeURIComponent(String(limit))}`,
+    ),
+  getAsrStatus: () => request<{ available: boolean; message: string }>('/asr/status'),
+}
+
 // ============== Brain ==============
 
 export const apiBrain = {
   status: (base_id?: string) => {
-    const qs = base_id ? `?base_id=${base_id}` : '';
+    const qs = base_id ? `?base_id=${encodeURIComponent(base_id)}` : '';
     return request<any>(`/brain/status${qs}`);
   },
   setMode: (mode: string, base_id?: string) => {
-    const qs = base_id ? `?base_id=${base_id}` : '';
+    const qs = base_id ? `?base_id=${encodeURIComponent(base_id)}` : '';
     return request<any>(`/brain/mode${qs}`, {
       method: 'POST',
       body: JSON.stringify({ mode }),
@@ -351,6 +479,21 @@ export const apiBrain = {
 };
 
 // ============== Voice ==============
+
+export interface VoicePreviewRequest {
+  text: string
+  speaker?: string
+  figure_id?: string
+}
+
+export interface VoicePreviewAudio {
+  blob: Blob
+  engine: string
+  source: string
+  speaker: string
+  synthesizedAt: string
+  transferredAt: string
+}
 
 export const apiVoice = {
   generate: (figure_id: string, text: string, speaker?: string) =>
@@ -363,6 +506,12 @@ export const apiVoice = {
       method: 'POST',
       body: JSON.stringify({ figure_id, speaker, tts_engine }),
     }),
+  preview: (payload: VoicePreviewRequest, signal?: AbortSignal) =>
+    requestAudio('/voice/preview', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      signal,
+    }),
   listSpeakers: () => request<any>('/voice/speakers'),
   upload: async (figure_id: string, audioFile: File, consentAgreed: boolean) => {
     const form = new FormData();
@@ -370,30 +519,20 @@ export const apiVoice = {
     form.append('audio', audioFile);
     form.append('consent_agreed', String(consentAgreed));
     form.append('consent_text_version', 'v1');
-    const res = await fetch('/api/voice/upload', { method: 'POST', body: form });
-    if (!res.ok) throw new Error('Upload failed');
-    return res.json();
+    return request<any>('/voice/upload', { method: 'POST', body: form })
   },
-  cloneStart: async (figure_id: string, prompt_text?: string) => {
-    const res = await fetch('/api/voice/clone/start', {
+  cloneStart: (figure_id: string, prompt_text?: string) =>
+    request<any>('/voice/clone/start', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ figure_id, prompt_text: prompt_text || '' }),
-    });
-    if (!res.ok) throw new Error('Clone start failed');
-    return res.json();
-  },
-  cloneStatus: async (figure_id: string) => {
-    const res = await fetch(`/api/voice/clone/status?figure_id=${figure_id}`);
-    if (!res.ok) throw new Error('Get clone status failed');
-    return res.json();
-  },
+    }),
+  cloneStatus: (figure_id: string) =>
+    request<any>(`/voice/clone/status?figure_id=${encodeURIComponent(figure_id)}`),
 };
 
 // ============== Sync ==============
 
 export interface CloudSyncRequest {
-  user_id: string
   figures: any[]
   dialogue_logs: any[]
   events: any[]
@@ -416,18 +555,15 @@ export const apiSync = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
-  download: (user_id: string, last_sync_at?: string) => {
-    const qs = last_sync_at ? `?last_sync_at=${last_sync_at}` : ''
-    return request<any>(`/sync/download?user_id=${user_id}${qs}`)
+  download: (last_sync_at?: string) => {
+    const qs = new URLSearchParams()
+    if (last_sync_at) qs.set('last_sync_at', last_sync_at)
+    const suffix = qs.size > 0 ? `?${qs.toString()}` : ''
+    return request<any>(`/sync/download${suffix}`, { method: 'POST' })
   },
   sync: (data: CloudSyncRequest) =>
     request<any>('/sync/sync', {
       method: 'POST',
       body: JSON.stringify(data),
-    }),
-  migrate: (user_id: string) =>
-    request<any>('/sync/migrate', {
-      method: 'POST',
-      body: JSON.stringify({ user_id }),
     }),
 };

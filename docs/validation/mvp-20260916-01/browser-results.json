@@ -1,0 +1,62 @@
+[
+  {
+    "cases": ["E2E-01", "CREATE-01", "CREATE-03"],
+    "result": "partial",
+    "observation": "桌面 Chrome 隔离账号完成登录、粘贴真实认领码、填写名字与一句话、刷新恢复草稿、提交后直接进入交流页；服务端只创建一个角色并激活。隔离 UI 服务未配置 ASR，语音按钮禁用，因此 E2E-01/CREATE-01 未满足真实语音条件，CREATE-03 满足。",
+    "evidence": ["ui-requests.jsonl", "browser screenshots recorded by browser tool"]
+  },
+  {
+    "cases": ["MEMORY-01", "MEMORY-03", "MEMORY-04"],
+    "result": "partial",
+    "observation": "H5 成功新增“用户最喜欢蓝色”，修改为绿色；首次删除弹窗取消后内容保留，再次确认后内容删除。未在本轮成功的真实设备轮次中复核问答语义。",
+    "evidence": ["ui-requests.jsonl", "browser screenshots recorded by browser tool"]
+  },
+  {
+    "cases": ["PERSONA-03", "PERSONA-05"],
+    "result": "partial",
+    "observation": "隔离假 provider 的 H5 文字入口完成一轮，显示用户文本和“我是 AI 驱动的灵偶”回复；实际 ASR/TTS 未在该 UI 环境启用。",
+    "evidence": ["ui-requests.jsonl", "browser screenshots recorded by browser tool"]
+  },
+  {
+    "cases": ["E2E-06", "CREATE-08", "UX-03"],
+    "result": "pass",
+    "observation": "已有当前角色时 /create 重定向 /home；/simulate、/voice-select、/dev/simulate、/dev/voices 均重定向 /home。首页只显示当前灵偶、继续交流、记忆和编辑入口。",
+    "evidence": ["browser tool route evaluation"]
+  },
+  {
+    "cases": ["AUTH-06"],
+    "result": "partial",
+    "observation": "桌面 H5 点击退出后跳转 /login，浏览器后退仍停留 /login。该隔离 UI 没有活动语音连接，未覆盖麦克风/WS 释放。",
+    "evidence": ["browser tool logout evaluation"]
+  },
+  {
+    "cases": ["UX-01", "UX-02", "UX-06"],
+    "result": "blocked",
+    "observation": "本轮浏览器工具仅获得 1728x940 桌面视口；未取得 360/390 软键盘、iOS Safari、Android Chrome 和完整键盘无障碍证据。",
+    "evidence": []
+  },
+  {
+    "cases": ["H5VOICE-01", "H5VOICE-02", "H5VOICE-03", "H5VOICE-04", "H5VOICE-05", "H5VOICE-06", "H5VOICE-07", "H5VOICE-08"],
+    "result": "blocked",
+    "observation": "隔离 UI 服务不加载真实 ASR provider；/api/asr/status 不可用使语音按钮禁用。前端自动化探针已通过，但不能代替这些浏览器真实语音用例。",
+    "evidence": ["baseline-test_voice.log", "baseline-test_audio.log"]
+  },
+  {
+    "cases": ["OUTPUT-01", "OUTPUT-02", "OUTPUT-04", "OUTPUT-06"],
+    "result": "blocked",
+    "observation": "本轮未在 H5 中启用真实试听 provider，也未取得系统静音、路由切换和尾音录音证据。",
+    "evidence": []
+  },
+  {
+    "cases": ["CREATE-02"],
+    "result": "partial",
+    "observation": "浏览器确认名字 maxLength=12、设定 maxLength=80；未逐组保存全部 0/1/12/13 与 0/1/80/81 变体。",
+    "evidence": ["browser tool input evaluation"]
+  },
+  {
+    "cases": ["CREATE-04"],
+    "result": "blocked",
+    "observation": "验证了页面刷新恢复，未完全退出并重启浏览器进程，不能将刷新等同于关闭恢复。",
+    "evidence": []
+  }
+]

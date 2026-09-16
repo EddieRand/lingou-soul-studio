@@ -1,0 +1,420 @@
+[
+  {
+    "case": "AUTH-01",
+    "passed": true,
+    "coverage": "API scope",
+    "observation": {
+      "username_email_same_owner": true,
+      "verify_twice": 200,
+      "browser_refresh": "not included"
+    },
+    "time": "2026-09-16T05:25:49.299819+00:00"
+  },
+  {
+    "case": "AUTH-02",
+    "passed": true,
+    "coverage": "API scope",
+    "observation": {
+      "boundaries": [
+        {
+          "variant": "blank username",
+          "status": 422
+        },
+        {
+          "variant": "1 char username",
+          "status": 200
+        },
+        {
+          "variant": "50 chars username",
+          "status": 200
+        },
+        {
+          "variant": "51 chars username",
+          "status": 422
+        },
+        {
+          "variant": "7 char password",
+          "status": 422
+        },
+        {
+          "variant": "8 char password",
+          "status": 200
+        },
+        {
+          "variant": "72 bytes password",
+          "status": 200
+        },
+        {
+          "variant": "73 bytes password",
+          "status": 422
+        }
+      ],
+      "invalid_email": 422,
+      "concurrent_codes": [
+        200,
+        400
+      ]
+    },
+    "time": "2026-09-16T05:25:50.118664+00:00"
+  },
+  {
+    "case": "AUTH-03",
+    "passed": true,
+    "coverage": "API scope",
+    "observation": {
+      "codes": [
+        401,
+        401,
+        401,
+        401
+      ],
+      "error_does_not_enumerate": true,
+      "environment": "all provider credentials absent"
+    },
+    "time": "2026-09-16T05:25:50.780101+00:00"
+  },
+  {
+    "case": "PAIR-02",
+    "passed": true,
+    "coverage": "API scope",
+    "observation": {
+      "invalid_codes": [
+        422,
+        400,
+        400,
+        400,
+        400
+      ],
+      "original_valid_code_still_works": true
+    },
+    "time": "2026-09-16T05:25:51.114206+00:00"
+  },
+  {
+    "case": "PAIR-03",
+    "passed": true,
+    "coverage": "API scope",
+    "observation": {
+      "race": [
+        200,
+        409
+      ],
+      "replays": [
+        200,
+        200,
+        200
+      ],
+      "owner_unique": true
+    },
+    "time": "2026-09-16T05:25:51.775095+00:00"
+  },
+  {
+    "case": "PAIR-04",
+    "passed": true,
+    "coverage": "API scope",
+    "observation": {
+      "before_unbind": 409,
+      "after_unbind": 200
+    },
+    "time": "2026-09-16T05:25:52.124110+00:00"
+  },
+  {
+    "case": "PAIR-06",
+    "passed": true,
+    "coverage": "API scope",
+    "observation": {
+      "foreign_codes": [
+        404,
+        404
+      ],
+      "forged_owner": 422,
+      "unchanged": true
+    },
+    "time": "2026-09-16T05:25:52.802660+00:00"
+  },
+  {
+    "case": "CREATE-06",
+    "passed": true,
+    "coverage": "API scope",
+    "observation": {
+      "discarded_first_response": true,
+      "retry_code": 200,
+      "figure_count": 1,
+      "scope": "HTTP retry, UI pending"
+    },
+    "time": "2026-09-16T05:25:53.145499+00:00"
+  },
+  {
+    "case": "MEMORY-02",
+    "passed": false,
+    "coverage": "API scope",
+    "observation": {
+      "error": "'memory_candidates'",
+      "trace": "Traceback (most recent call last):\n  File \"/Users/bytedance/Downloads/LINGOU/docs/validation/mvp-20260916-01/probe_api.py\", line 52, in wrapped\n    observations = fn()\n                   ^^^^\n  File \"/Users/bytedance/Downloads/LINGOU/docs/validation/mvp-20260916-01/probe_api.py\", line 250, in candidate\n    expect(len(rows[\"memory_candidates\"]),1)\n               ~~~~^^^^^^^^^^^^^^^^^^^^^\nKeyError: 'memory_candidates'\n"
+    },
+    "time": "2026-09-16T05:25:53.489899+00:00"
+  },
+  {
+    "case": "MEMORY-05",
+    "passed": false,
+    "coverage": "API scope",
+    "observation": {
+      "error": "'memory_candidates'",
+      "trace": "Traceback (most recent call last):\n  File \"/Users/bytedance/Downloads/LINGOU/docs/validation/mvp-20260916-01/probe_api.py\", line 52, in wrapped\n    observations = fn()\n                   ^^^^\n  File \"/Users/bytedance/Downloads/LINGOU/docs/validation/mvp-20260916-01/probe_api.py\", line 268, in memory_limit\n    mid=rows[\"memory_candidates\"][0][\"memory_id\"]\n        ~~~~^^^^^^^^^^^^^^^^^^^^^\nKeyError: 'memory_candidates'\n"
+    },
+    "time": "2026-09-16T05:25:53.848711+00:00"
+  },
+  {
+    "case": "MEMORY-06",
+    "passed": true,
+    "coverage": "API scope",
+    "observation": {
+      "codes": [
+        422,
+        400,
+        201,
+        201,
+        422,
+        201,
+        201
+      ],
+      "duplicate_created": false,
+      "update_conflict": 409,
+      "DOM_rendering": "pending browser"
+    },
+    "time": "2026-09-16T05:25:54.201159+00:00"
+  },
+  {
+    "case": "MEMORY-07",
+    "passed": true,
+    "coverage": "API scope",
+    "observation": {
+      "concurrent_create": [
+        201,
+        201,
+        201,
+        201,
+        201,
+        201,
+        201,
+        201,
+        201,
+        201
+      ],
+      "different_updates": [
+        200,
+        200
+      ],
+      "same_updates": [
+        200,
+        200
+      ],
+      "final_count": 10
+    },
+    "time": "2026-09-16T05:25:54.563263+00:00"
+  },
+  {
+    "case": "MEMORY-09",
+    "passed": false,
+    "coverage": "API scope",
+    "observation": {
+      "error": "'memory_candidates'",
+      "trace": "Traceback (most recent call last):\n  File \"/Users/bytedance/Downloads/LINGOU/docs/validation/mvp-20260916-01/probe_api.py\", line 52, in wrapped\n    observations = fn()\n                   ^^^^\n  File \"/Users/bytedance/Downloads/LINGOU/docs/validation/mvp-20260916-01/probe_api.py\", line 321, in foreign_memory\n    candidate_id=memories(a)[\"memory_candidates\"][0][\"memory_id\"]\n                 ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^\nKeyError: 'memory_candidates'\n"
+    },
+    "time": "2026-09-16T05:25:55.245479+00:00"
+  },
+  {
+    "case": "DEVAUTH-02",
+    "passed": true,
+    "coverage": "API scope",
+    "observation": {
+      "close_codes": [
+        4401,
+        4401,
+        4401,
+        4401
+      ],
+      "provider_check_not_reached": true
+    },
+    "time": "2026-09-16T05:25:55.590588+00:00"
+  },
+  {
+    "case": "DEVAUTH-03",
+    "passed": true,
+    "coverage": "API scope",
+    "observation": {
+      "unclaimed": 4401,
+      "unactivated": 4404,
+      "activated_reaches_provider_status": true
+    },
+    "time": "2026-09-16T05:25:55.929863+00:00"
+  },
+  {
+    "case": "DEVAUTH-04",
+    "passed": true,
+    "coverage": "API scope",
+    "observation": {
+      "old_ws": 4401,
+      "old_http": 401,
+      "new_accepted": true,
+      "figure_unchanged": true
+    },
+    "time": "2026-09-16T05:25:56.271622+00:00"
+  },
+  {
+    "case": "DEVAUTH-06",
+    "passed": true,
+    "coverage": "API scope",
+    "observation": [
+      {
+        "scheme": "Device",
+        "method": "GET",
+        "path": "/api/figures",
+        "code": 401
+      },
+      {
+        "scheme": "Device",
+        "method": "GET",
+        "path": "/api/sync",
+        "code": 401
+      },
+      {
+        "scheme": "Device",
+        "method": "GET",
+        "path": "/api/figures/800d94cb-aeaa-4e2d-888d-bc54c414f9c1/memories",
+        "code": 401
+      },
+      {
+        "scheme": "Device",
+        "method": "POST",
+        "path": "/api/figures/800d94cb-aeaa-4e2d-888d-bc54c414f9c1/memories",
+        "code": 401
+      },
+      {
+        "scheme": "Device",
+        "method": "PUT",
+        "path": "/api/figures/800d94cb-aeaa-4e2d-888d-bc54c414f9c1/memories/missing",
+        "code": 401
+      },
+      {
+        "scheme": "Device",
+        "method": "DELETE",
+        "path": "/api/figures/800d94cb-aeaa-4e2d-888d-bc54c414f9c1/memories/missing",
+        "code": 401
+      },
+      {
+        "scheme": "Device",
+        "method": "POST",
+        "path": "/api/voice/preview",
+        "code": 401
+      },
+      {
+        "scheme": "Bearer",
+        "method": "GET",
+        "path": "/api/figures",
+        "code": 401
+      },
+      {
+        "scheme": "Bearer",
+        "method": "GET",
+        "path": "/api/sync",
+        "code": 401
+      },
+      {
+        "scheme": "Bearer",
+        "method": "GET",
+        "path": "/api/figures/800d94cb-aeaa-4e2d-888d-bc54c414f9c1/memories",
+        "code": 401
+      },
+      {
+        "scheme": "Bearer",
+        "method": "POST",
+        "path": "/api/figures/800d94cb-aeaa-4e2d-888d-bc54c414f9c1/memories",
+        "code": 401
+      },
+      {
+        "scheme": "Bearer",
+        "method": "PUT",
+        "path": "/api/figures/800d94cb-aeaa-4e2d-888d-bc54c414f9c1/memories/missing",
+        "code": 401
+      },
+      {
+        "scheme": "Bearer",
+        "method": "DELETE",
+        "path": "/api/figures/800d94cb-aeaa-4e2d-888d-bc54c414f9c1/memories/missing",
+        "code": 401
+      },
+      {
+        "scheme": "Bearer",
+        "method": "POST",
+        "path": "/api/voice/preview",
+        "code": 401
+      }
+    ],
+    "time": "2026-09-16T05:25:56.949499+00:00"
+  },
+  {
+    "case": "DEVAUTH-07",
+    "passed": true,
+    "coverage": "API scope",
+    "observation": {
+      "protocol_codes": [
+        4401,
+        4401,
+        4401
+      ],
+      "unknown_message_variants": "separate protocol probe"
+    },
+    "time": "2026-09-16T05:25:57.290487+00:00"
+  },
+  {
+    "case": "DEVAUTH-08",
+    "passed": true,
+    "coverage": "API scope",
+    "observation": {
+      "default_test_routes": 404,
+      "explicit_test_enabled": 200,
+      "disabled_rejects_issued_test_secret": true
+    },
+    "time": "2026-09-16T05:25:57.632645+00:00"
+  },
+  {
+    "case": "MEMORY-02",
+    "passed": true,
+    "coverage": "API scope",
+    "observation": {
+      "candidate_excluded_before_confirmation": true,
+      "confirmed_prompt_contains_fact": true
+    },
+    "time": "2026-09-16T05:27:16.800063+00:00"
+  },
+  {
+    "case": "MEMORY-05",
+    "passed": true,
+    "coverage": "API scope",
+    "observation": {
+      "max": 10,
+      "11th": 409,
+      "confirm_when_full": 409,
+      "confirm_after_delete": 200
+    },
+    "time": "2026-09-16T05:27:17.167971+00:00"
+  },
+  {
+    "case": "MEMORY-09",
+    "passed": true,
+    "coverage": "API scope",
+    "observation": {
+      "foreign_methods": [
+        404,
+        404,
+        404,
+        404,
+        404
+      ],
+      "cross_figure_memory_id": 404,
+      "extra_owner": 422,
+      "unchanged": true
+    },
+    "time": "2026-09-16T05:27:17.853458+00:00"
+  }
+]

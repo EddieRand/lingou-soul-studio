@@ -5,6 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "test:auth": "node scripts/verify-auth-client.cjs",
+    "test:voice": "node scripts/verify-voice-lifecycle.cjs",
+    "test:audio": "node scripts/verify-voice-preview.cjs",
+    "test:flow": "node scripts/verify-primary-flow.cjs",
     "build": "tsc && vite build",
     "preview": "vite preview"
   },

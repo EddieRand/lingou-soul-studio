@@ -1,65 +1,77 @@
-# services/companion-server/app/api/dialogue.py
-import sys
-import threading
-from pathlib import Path
-from typing import Optional
+"""Owner-scoped dialogue APIs."""
 
-project_root = Path(__file__).parent.parent.parent.parent
-sys.path.insert(0, str(project_root))
+from datetime import datetime, timezone
+from typing import Literal, Optional
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, ConfigDict
 
-from app.core.dialogue_state import get_state, transition
-from app.core.dialogue_engine import wake_and_start_listening, process_text_input
-from app.core.memory_engine import extract_memory_async
-from app.core.relationship_engine import add_points
-from data.store import get_base, get_figure, list_dialogue_logs, save_figure
+from app.api.auth import get_current_user
+from app.api.ownership import (
+    current_user_id,
+    owned_base_or_404,
+    owned_figure_or_404,
+)
+from app.core.dialogue_engine import process_text_input, wake_and_start_listening
+from app.core.dialogue_state import get_state
+from data.store import (
+    figure_storage_key,
+    list_dialogue_logs,
+    save_figure,
+)
+
 
 router = APIRouter()
 
 
-class WakeRequest(BaseModel):
+class _StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class WakeRequest(_StrictModel):
     base_id: str
-    trigger: str  # "voice_wake" | "double_tap" | "long_press"
+    trigger: Literal["voice_wake", "double_tap", "long_press"]
     text: Optional[str] = None
 
 
-class TextRequest(BaseModel):
+class TextRequest(_StrictModel):
     base_id: str
     text: str
-    brain_mode_override: Optional[str] = None  # 可选：强制 "online" | "offline"
+    brain_mode_override: Optional[Literal["online", "offline"]] = None
 
 
-class MemorySummaryRequest(BaseModel):
+class MemorySummaryRequest(_StrictModel):
     figure_id: str
 
 
-@router.post("/wake")
-def dialogue_wake(req: WakeRequest):
-    """
-    Wake dialogue: detect wake and enter listening state.
-    Bug fix: if base/figure exists but wake name doesn't match, return 200 {woken:false}.
-    Only raise 404 if base or active figure truly doesn't exist.
-    """
-    # First check: base must exist
-    base = get_base(req.base_id)
-    if not base:
-        raise HTTPException(status_code=404, detail="Base not found")
+class InterruptRequest(_StrictModel):
+    base_id: str
 
-    # Figure must exist
+
+class AudioDialogueRequest(_StrictModel):
+    base_id: str
+    audio_path: str
+
+
+@router.post("/wake")
+def dialogue_wake(
+    request: WakeRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    owner_user_id = current_user_id(current_user)
+    base = owned_base_or_404(request.base_id, owner_user_id)
     figure_id = base.get("active_figure_id")
     if not figure_id:
-        raise HTTPException(status_code=404, detail="No active figure on this base")
+        raise HTTPException(status_code=404, detail="资源不存在或不可访问")
+    figure = owned_figure_or_404(str(figure_id), owner_user_id)
 
-    figure = get_figure(figure_id)
-    if not figure:
-        raise HTTPException(status_code=404, detail="Active figure not found")
-
-    # Now try wake detection
-    figure_ret, state = wake_and_start_listening(req.base_id, req.trigger, req.text)
+    figure_ret, state = wake_and_start_listening(
+        request.base_id,
+        request.trigger,
+        request.text,
+        owner_user_id=owner_user_id,
+    )
     if figure_ret is None:
-        # Wake name didn't match (for voice_wake) - not a 404, return 200 with woken=false
         return {
             "woken": False,
             "state": "idle",
@@ -69,7 +81,6 @@ def dialogue_wake(req: WakeRequest):
                 "archetype": figure.get("soul_profile", {}).get("archetype"),
             },
         }
-
     return {
         "woken": True,
         "state": state,
@@ -82,38 +93,39 @@ def dialogue_wake(req: WakeRequest):
 
 
 @router.post("/text")
-def dialogue_text(req: TextRequest):
-    """Process text input through dialogue engine (now uses brain_router)."""
-    result = process_text_input(req.base_id, req.text, brain_mode_override=req.brain_mode_override)
+def dialogue_text(
+    request: TextRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    owner_user_id = current_user_id(current_user)
+    owned_base_or_404(request.base_id, owner_user_id)
+    result = process_text_input(
+        request.base_id,
+        request.text,
+        brain_mode_override=request.brain_mode_override,
+        owner_user_id=owner_user_id,
+    )
     if "error" in result and not result.get("reply"):
-        raise HTTPException(status_code=404, detail=result.get("error", "Processing failed"))
-    
-    # Phase C: 异步提取记忆 + 增加羁绊点（不阻塞对话）
-    figure_id = result.get("figure_id")
-    if figure_id:
-        try:
-            base = get_base(req.base_id)
-            owner = base.get("bound_user_id") if base else None
-            figure = get_figure(figure_id, user_id=owner)
-            if figure:
-                extract_memory_async(figure, req.text, user_id=owner)
-                add_points(figure, "dialogue")
-                save_figure(figure_id, figure, user_id=owner)
-        except Exception:
-            pass  # 提取失败不影响对话
-    
+        raise HTTPException(status_code=404, detail="资源不存在或不可访问")
+
     return {
         "reply": result["reply"],
         "brain_mode": result["brain_mode"],
         "tts_engine": result.get("tts_engine"),
         "emotion_state": result["emotion_state"],
-        "figure_id": figure_id,
+        "figure_id": result.get("figure_id"),
+        "session_id": result.get("session_id"),
+        "turn_id": result.get("turn_id"),
     }
 
 
 @router.get("/state")
-def get_dialogue_state(base_id: str):
-    """Get current dialogue state for a base."""
+def get_dialogue_state(
+    base_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    owner_user_id = current_user_id(current_user)
+    owned_base_or_404(base_id, owner_user_id)
     state = get_state(base_id)
     return {
         "state": state.state,
@@ -130,9 +142,13 @@ def get_dialogue_log_list(
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
     limit: int = 50,
+    current_user: dict = Depends(get_current_user),
 ):
-    """Query dialogue logs."""
+    owner_user_id = current_user_id(current_user)
+    if figure_id:
+        owned_figure_or_404(figure_id, owner_user_id)
     return list_dialogue_logs(
+        user_id=owner_user_id,
         figure_id=figure_id,
         from_date=from_date,
         to_date=to_date,
@@ -141,74 +157,59 @@ def get_dialogue_log_list(
 
 
 @router.post("/memory-summary")
-def generate_memory_summary(req: MemorySummaryRequest):
-    """
-    Generate a memory summary from recent dialogue logs.
-    MVP: rule-based summary from recent logs.
-    Writes summary back to figure.memory.
-    """
-    figure = get_figure(req.figure_id)
-    if not figure:
-        raise HTTPException(status_code=404, detail="找不到这个灵偶")
-
-    # Read recent dialogue logs
-    recent_logs = list_dialogue_logs(figure_id=req.figure_id, limit=20)
+def generate_memory_summary(
+    request: MemorySummaryRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    owner_user_id = current_user_id(current_user)
+    figure = owned_figure_or_404(request.figure_id, owner_user_id)
+    recent_logs = list_dialogue_logs(
+        user_id=owner_user_id,
+        figure_id=request.figure_id,
+        limit=20,
+    )
     memory = figure.get("memory", {})
-    address_user_as = figure.get("soul_profile", {}).get("address_user_as", "主人")
-
-    # Rule-based summary generation
+    address_user_as = figure.get("soul_profile", {}).get("address_user_as", "你")
     interaction_count = memory.get("interaction_count", 0)
-    last_interaction_at = memory.get("last_interaction_at", None)
-
+    last_interaction_at = memory.get("last_interaction_at")
     if not recent_logs:
         summary = f"和{address_user_as}还没有聊天记录~"
     else:
         total = len(recent_logs)
-        last_text = recent_logs[0].get("user_input_text", "") if recent_logs else ""
-        last_reply_snippet = recent_logs[0].get("reply_text", "")[:15] if recent_logs else ""
-
+        last_text = recent_logs[0].get("user_input_text", "")
+        last_reply = recent_logs[0].get("reply_text", "")[:15]
         if total == 1:
             summary = f"和{address_user_as}聊了1次，话题关于「{last_text[:10]}」"
         else:
-            summary = f"和{address_user_as}共聊了{total}次。最近：「{last_text[:10]}」→ {last_reply_snippet}"
-
-    # Write back to figure.memory
+            summary = (
+                f"和{address_user_as}共聊了{total}次。"
+                f"最近：「{last_text[:10]}」→ {last_reply}"
+            )
     memory["memory_summary"] = summary
-    memory["last_interaction_at"] = last_interaction_at
-    memory["interaction_count"] = interaction_count
     figure["memory"] = memory
-    from datetime import datetime
-    figure["updated_at"] = datetime.utcnow().isoformat()
-    save_figure(req.figure_id, figure)
-
+    figure["updated_at"] = datetime.now(timezone.utc).isoformat()
+    save_figure(request.figure_id, figure, user_id=owner_user_id)
     return {
-        "figure_id": req.figure_id,
+        "figure_id": request.figure_id,
         "summary": summary,
         "last_interaction_at": last_interaction_at,
         "interaction_count": interaction_count,
     }
 
 
-# ============== Audio Dialogue (ASR Skeleton) =============
-
-class InterruptRequest(BaseModel):
-    base_id: str
-
-
-class AudioDialogueRequest(BaseModel):
-    base_id: str
-    audio_path: str  # path to uploaded audio file on server
-
-
 @router.post("/interrupt")
-def dialogue_interrupt(req: InterruptRequest):
-    """
-    打断当前灵偶语音播放（barge-in）。
-    调用 stop_playback() 立即停止当前音频 + 清空队列。
-    """
+def dialogue_interrupt(
+    request: InterruptRequest,
+    current_user: dict = Depends(get_current_user),
+):
     from app.core.tts_adapter import stop_playback
 
-    stopped = stop_playback()
+    owner_user_id = current_user_id(current_user)
+    base = owned_base_or_404(request.base_id, owner_user_id)
+    figure_id = base.get("active_figure_id")
+    stopped = False
+    if figure_id:
+        stopped = stop_playback(figure_storage_key(owner_user_id, str(figure_id)))
     return {
         "stopped": stopped,
         "message": "已停止播放" if stopped else "没有在播放",
@@ -216,40 +217,39 @@ def dialogue_interrupt(req: InterruptRequest):
 
 
 @router.post("/audio")
-def dialogue_audio(req: AudioDialogueRequest):
-    """
-    Process audio input: ASR → dialogue_engine.
-    MVP: ASR stub - raises NotImplementedError.
-    Future: audio_path → asr_adapter.transcribe → process_text_input
-    """
-    from app.core.asr_adapter import transcribe, is_asr_available
+def dialogue_audio(
+    request: AudioDialogueRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    from app.core.asr_adapter import is_asr_available, transcribe
 
+    owner_user_id = current_user_id(current_user)
+    owned_base_or_404(request.base_id, owner_user_id)
     if not is_asr_available():
         raise HTTPException(
             status_code=501,
             detail="ASR not yet implemented. Use /api/dialogue/text for text input.",
         )
-
     try:
-        user_text = transcribe(req.audio_path)
-    except NotImplementedError:
-        raise HTTPException(
-            status_code=501,
-            detail="ASR not yet implemented.",
-        )
-
+        user_text = transcribe(request.audio_path)
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=501, detail="ASR not yet implemented.") from exc
     if not user_text or not user_text.strip():
         raise HTTPException(status_code=400, detail="ASR returned empty text")
-
-    # Delegate to text dialogue
-    result = process_text_input(req.base_id, user_text, brain_mode_override="online")
+    result = process_text_input(
+        request.base_id,
+        user_text,
+        brain_mode_override="online",
+        owner_user_id=owner_user_id,
+    )
     if "error" in result and not result.get("reply"):
-        raise HTTPException(status_code=404, detail=result.get("error", "Processing failed"))
-
+        raise HTTPException(status_code=404, detail="资源不存在或不可访问")
     return {
         "reply": result["reply"],
         "transcribed_text": user_text,
         "brain_mode": result["brain_mode"],
         "emotion_state": result["emotion_state"],
         "figure_id": result.get("figure_id"),
+        "session_id": result.get("session_id"),
+        "turn_id": result.get("turn_id"),
     }

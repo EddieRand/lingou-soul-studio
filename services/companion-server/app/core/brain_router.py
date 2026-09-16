@@ -95,6 +95,7 @@ def route_reply(
     history: Optional[List[dict]] = None,
     session_summary: str = "",
     forced_mode_override: Optional[str] = None,
+    voice_pool_key: Optional[str] = None,
 ) -> Tuple[str, str]:
     """
     Route to online_brain or offline_brain.
@@ -110,13 +111,17 @@ def route_reply(
     mode = forced_mode_override or get_forced_mode(base_id)
 
     if mode == "offline":
-        reply = generate_offline_reply(figure, user_input_text)
+        reply = generate_offline_reply(
+            figure, user_input_text, voice_pool_key=voice_pool_key
+        )
         return reply, "offline"
 
     if mode == "online":
         if not _is_configured():
             _fallback_reasons[base_id] = "forced_online_but_no_api_key"
-            reply = generate_offline_reply(figure, user_input_text)
+            reply = generate_offline_reply(
+                figure, user_input_text, voice_pool_key=voice_pool_key
+            )
             return reply, "offline"
         try:
             reply = generate_online_reply(figure, user_input_text, history, session_summary)
@@ -124,14 +129,18 @@ def route_reply(
             return reply, "online"
         except OnlineBrainError as e:
             _fallback_reasons[base_id] = f"online_error:{str(e)[:50]}"
-            reply = generate_offline_reply(figure, user_input_text)
+            reply = generate_offline_reply(
+                figure, user_input_text, voice_pool_key=voice_pool_key
+            )
             return reply, "offline"
 
     # Auto mode（mode is None）：API 已配置则直接尝试在线，离线只作兜底
     # Rule 1: no API key → offline
     if not _is_configured():
         _fallback_reasons[base_id] = "no_api_key"
-        reply = generate_offline_reply(figure, user_input_text)
+        reply = generate_offline_reply(
+            figure, user_input_text, voice_pool_key=voice_pool_key
+        )
         return reply, "offline"
 
     # Rule 2: try online (auto 模式优先在线，删除短句判断)
@@ -141,7 +150,9 @@ def route_reply(
         return reply, "online"
     except OnlineBrainError as e:
         _fallback_reasons[base_id] = f"online_error:{str(e)[:50]}"
-        reply = generate_offline_reply(figure, user_input_text)
+        reply = generate_offline_reply(
+            figure, user_input_text, voice_pool_key=voice_pool_key
+        )
         return reply, "offline"
 
 
@@ -157,6 +168,8 @@ def route_reply_streaming(
     history: Optional[List[dict]] = None,
     session_summary: str = "",
     forced_mode_override: Optional[str] = None,
+    voice_pool_key: Optional[str] = None,
+    cancel_event=None,
 ) -> Generator[str, None, str]:
     """
     Streaming version of route_reply.
@@ -171,16 +184,22 @@ def route_reply_streaming(
     """
     # 【关键修复】override 优先于底座设置
     mode = forced_mode_override or get_forced_mode(base_id)
+    if cancel_event and cancel_event.is_set():
+        return "cancelled"
 
     if mode == "offline":
-        reply = generate_offline_reply(figure, user_input_text)
+        reply = generate_offline_reply(
+            figure, user_input_text, voice_pool_key=voice_pool_key
+        )
         yield reply
         return "offline"
 
     if mode == "online":
         if not _is_configured():
             _fallback_reasons[base_id] = "forced_online_but_no_api_key"
-            reply = generate_offline_reply(figure, user_input_text)
+            reply = generate_offline_reply(
+                figure, user_input_text, voice_pool_key=voice_pool_key
+            )
             yield reply
             return "offline"
         try:
@@ -190,38 +209,64 @@ def route_reply_streaming(
                 print(f"[路由] 检测到联网意图: '{user_input_text}' → Bot联网")
                 # Bot 联网路径：generate_online_reply_streaming_with_bot 内部会走 Bot 搜索
                 for sentence in generate_online_reply_streaming_with_bot(
-                    figure, user_input_text, history, session_summary
+                    figure,
+                    user_input_text,
+                    history,
+                    session_summary,
+                    cancel_event=cancel_event,
                 ):
+                    if cancel_event and cancel_event.is_set():
+                        return "cancelled"
                     yield sentence
             else:
                 # 普通在线路径
                 for sentence in generate_online_reply_streaming(
-                    figure, user_input_text, history, session_summary
+                    figure,
+                    user_input_text,
+                    history,
+                    session_summary,
+                    cancel_event=cancel_event,
                 ):
+                    if cancel_event and cancel_event.is_set():
+                        return "cancelled"
                     yield sentence
             _clear_fallback_reason(base_id)
             return "online"
         except OnlineBrainError as e:
             _fallback_reasons[base_id] = f"online_error:{str(e)[:50]}"
-            reply = generate_offline_reply(figure, user_input_text)
+            reply = generate_offline_reply(
+                figure, user_input_text, voice_pool_key=voice_pool_key
+            )
             yield reply
             return "offline"
 
     # Auto mode（mode is None）：API 已配置则直接尝试在线，离线只作兜底
     if not _is_configured():
         _fallback_reasons[base_id] = "no_api_key"
-        reply = generate_offline_reply(figure, user_input_text)
+        reply = generate_offline_reply(
+            figure, user_input_text, voice_pool_key=voice_pool_key
+        )
         yield reply
         return "offline"
 
     # Auto 模式优先在线（删除短句判断）
     try:
-        for sentence in generate_online_reply_streaming(figure, user_input_text, history):
+        for sentence in generate_online_reply_streaming(
+            figure,
+            user_input_text,
+            history,
+            session_summary,
+            cancel_event=cancel_event,
+        ):
+            if cancel_event and cancel_event.is_set():
+                return "cancelled"
             yield sentence
         _clear_fallback_reason(base_id)
         return "online"
     except OnlineBrainError as e:
         _fallback_reasons[base_id] = f"online_error:{str(e)[:50]}"
-        reply = generate_offline_reply(figure, user_input_text)
+        reply = generate_offline_reply(
+            figure, user_input_text, voice_pool_key=voice_pool_key
+        )
         yield reply
         return "offline"

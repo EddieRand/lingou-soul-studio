@@ -1,0 +1,18 @@
+[
+  {
+    "cases": [
+      "E2E-06",
+      "CREATE-03",
+      "CREATE-08",
+      "UX-03"
+    ],
+    "result": "blocked",
+    "observation": "The isolated API and Vite services returned HTTP 200, but three browser bridge actions timed out. No new browser interaction result is claimed.",
+    "evidence": [
+      "baseline-test_auth.log",
+      "baseline-test_flow.log",
+      "baseline-build.log",
+      "../mvp-20260916-01/browser-results.json"
+    ]
+  }
+]

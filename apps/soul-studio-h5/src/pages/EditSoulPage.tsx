@@ -1,5 +1,5 @@
 // pages/EditSoulPage.tsx - 二次编辑灵偶（/soul/:id/edit）
-import { useState, useEffect, useMemo, useRef, type ChangeEvent } from 'react'
+import { useState, useEffect, useMemo, type ChangeEvent } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { apiFigures, apiVoice, apiSouls, Archetype } from '../services/api'
 import StarField from '../components/StarField'
@@ -7,6 +7,7 @@ import PageHeader from '../components/PageHeader'
 import ArchetypeCrest from '../components/ArchetypeCrest'
 import Waveform from '../components/Waveform'
 import LiquidGlassPanel from '../components/LiquidGlassPanel'
+import { useVoicePreview } from '../hooks/useVoicePreview'
 
 interface Speaker {
   speaker_id: string
@@ -28,23 +29,7 @@ interface SpeakerCategory {
   speakers: Speaker[]
 }
 
-const ADDRESS_CHIPS = ['Eddie', '主人', '搭档', '师父', '朋友']
-
-const ACTION_LABELS: Record<string, { label: string; action: string }> = {
-  figure_placed: { label: '放上底座', action: 'short_reply' },
-  light_touch: { label: '轻触', action: 'short_reply' },
-  heavy_press: { label: '重按', action: 'short_reply' },
-  double_tap: { label: '双击', action: 'enter_listening_once' },
-  long_press: { label: '长按', action: 'enter_continuous_companion' },
-}
-
-const TOUCH_REACTIONS_TEMPLATE = [
-  { key: 'figure_placed', label: '放上底座', icon: '🏠', default: '你回来了。', actionLabel: '短回应' },
-  { key: 'light_touch', label: '轻触', icon: '👆', default: '嗯？想我了？', actionLabel: '短回应' },
-  { key: 'heavy_press', label: '重按', icon: '✋', default: '轻一点，我不喜欢被粗暴对待。', actionLabel: '短回应' },
-  { key: 'double_tap', label: '双击', icon: '✌️', default: '说吧，这次又遇到什么事了？', actionLabel: '启动一次对话' },
-  { key: 'long_press', label: '长按', icon: '⏱', default: '我会一直听你说，慢慢来。', actionLabel: '持续陪伴' },
-]
+const ADDRESS_CHIPS = ['你', '主人', '搭档', '师父', '朋友']
 
 type ToastType = { message: string; type: 'info' | 'error' | 'success' } | null
 
@@ -115,7 +100,7 @@ export default function EditSoulPage() {
 
   // Step 1: 基础
   const [figureName, setFigureName] = useState('')
-  const [addressUserAs, setAddressUserAs] = useState('Eddie')
+  const [addressUserAs, setAddressUserAs] = useState('你')
   const [customAddress, setCustomAddress] = useState('')
   const [wakeNames, setWakeNames] = useState<string[]>([])
   const [wakeNameError, setWakeNameError] = useState('')
@@ -124,15 +109,6 @@ export default function EditSoulPage() {
   const [archetypes, setArchetypes] = useState<Archetype[]>([])
   const [selectedArchetype, setSelectedArchetype] = useState<Archetype | null>(null)
   const [selectedSpeaker, setSelectedSpeaker] = useState<Speaker | null>(null)
-  const [playing, setPlaying] = useState<string | null>(null)
-
-  // Step 3: 触摸反应
-  const [touchReactions, setTouchReactions] = useState<Record<string, { reply: string; action: string }>>(
-    Object.fromEntries(TOUCH_REACTIONS_TEMPLATE.map(t => [t.key, { reply: t.default, action: ACTION_LABELS[t.key].action }]))
-  )
-  const [editingTouchKey, setEditingTouchKey] = useState<string | null>(null)
-  const [editingTouchReply, setEditingTouchReply] = useState('')
-  const [showTouchEditModal, setShowTouchEditModal] = useState(false)
 
   // 深度字段（灵魂档案）
   const [relationships, setRelationships] = useState<Record<string, string>>({})
@@ -143,16 +119,14 @@ export default function EditSoulPage() {
   const [signatureLines, setSignatureLines] = useState<string[]>([])
   const [taboos, setTaboos] = useState<string[]>([])
   const [speakerCategories, setSpeakerCategories] = useState<SpeakerCategory[]>([])
-  const [genderFilter, setGenderFilter] = useState<'all' | 'female' | 'male'>('all')
-  const [categoryFilter, setCategoryFilter] = useState<string>('all')
-  const [playingDemo, setPlayingDemo] = useState<string | null>(null)
-
-  // 声音克隆
-  const [cloneStatus, setCloneStatus] = useState<'not_cloned' | 'cloning' | 'ready' | 'failed'>('not_cloned')
-  const [uploadedAudioName, setUploadedAudioName] = useState<string | null>(null)
-  const [consentAgreed, setConsentAgreed] = useState(false)
-  const [audioDuration, setAudioDuration] = useState<number | null>(null)
-  const [promptText, setPromptText] = useState('')
+  const {
+    snapshot: voicePreview,
+    preview: previewVoice,
+    stop: stopVoicePreview,
+  } = useVoicePreview()
+  const previewBusy = ['synthesizing', 'transferred', 'decoded', 'playing']
+    .includes(voicePreview.status)
+  const playingDemo = previewBusy ? voicePreview.targetKey : null
 
   function showToast(message: string, type: 'info' | 'error' | 'success' = 'info') {
     setToast({ message, type })
@@ -177,7 +151,9 @@ export default function EditSoulPage() {
         // 填充现有数据
         setFigureName(fig.name || '')
         const soul = fig.soul_profile || {}
-        setAddressUserAs(soul.address_user_as || 'Eddie')
+        const characterProfile = soul.character_profile || {}
+        const storedAddress = characterProfile.address_user_as || soul.address_user_as
+        setAddressUserAs(storedAddress === 'Eddie' ? '你' : storedAddress || '你')
         setWakeNames(fig.wake_names || [])
 
         // 人格
@@ -189,19 +165,7 @@ export default function EditSoulPage() {
         const spk = (spks?.speakers || []).find((s: Speaker) => s.speaker_id === voice.speaker)
         if (spk) setSelectedSpeaker(spk)
 
-        // 触摸反应
-        const reactions = fig.touch_reactions || {}
-        const merged: Record<string, { reply: string; action: string }> = {}
-        for (const t of TOUCH_REACTIONS_TEMPLATE) {
-          merged[t.key] = {
-            reply: reactions[t.key]?.[0] || t.default,
-            action: ACTION_LABELS[t.key].action,
-          }
-        }
-        setTouchReactions(merged)
-
         // 深度字段（灵魂档案）
-        const characterProfile = fig.soul_profile?.character_profile || {}
         setRelationships(characterProfile.relationships || {})
         setTraits(characterProfile.traits || [])
         setValues(characterProfile.values || [])
@@ -216,6 +180,12 @@ export default function EditSoulPage() {
     }
     loadData()
   }, [id])
+
+  useEffect(() => {
+    if (voicePreview.status === 'error') {
+      showToast(`试听失败：${voicePreview.error}`, 'error')
+    }
+  }, [voicePreview.error, voicePreview.status])
 
   function validateWakeNames(): string {
     if (wakeNames.length === 0) return '至少需要保留一个唤醒名'
@@ -238,10 +208,29 @@ export default function EditSoulPage() {
     setSaving(true)
     setError('')
     try {
-      // 构建更新数据
-      const touchReactionsOut: Record<string, string[]> = {}
-      for (const [key, val] of Object.entries(touchReactions)) {
-        touchReactionsOut[key] = [val.reply]
+      const existingSoul = figure?.soul_profile || {}
+      const existingPersona = existingSoul.persona || {}
+      const existingCharacter = existingSoul.character_profile || {}
+      const selectedAddress = (customAddress || addressUserAs || '你').trim() || '你'
+      const characterProfileOut = {
+        ...existingCharacter,
+        character_name: figureName.trim(),
+        name: figureName.trim(),
+        archetype: selectedArchetype?.archetype || existingSoul.archetype || '',
+        one_line: existingCharacter.one_line || existingSoul.one_line || '',
+        background: existingCharacter.background || '',
+        speech_style: selectedArchetype?.speaking_style || existingCharacter.speech_style || '',
+        address_user_as: selectedAddress,
+        catchphrases,
+        signature_lines: signatureLines,
+        taboos,
+        personality_traits: selectedArchetype?.personality_traits
+          || existingCharacter.personality_traits
+          || [],
+        relationships,
+        traits,
+        values,
+        knowledge_bounds: knowledgeBounds,
       }
 
       await apiFigures.update(id, {
@@ -252,47 +241,33 @@ export default function EditSoulPage() {
           archetype: selectedArchetype?.archetype || figure?.soul_profile?.archetype,
           name: figureName.trim(),
           avatar_url: avatarUrl,
-          address_user_as: customAddress || addressUserAs,
+          address_user_as: selectedAddress,
           persona: {
+            ...existingPersona,
             traits: selectedArchetype?.personality_traits || [],
             greeting: selectedArchetype?.greeting || '你好~',
             speaking_style: selectedArchetype?.speaking_style || 'cute',
           },
-          character_profile: {
-            name: figureName.trim(),
-            archetype: selectedArchetype?.archetype || figure?.soul_profile?.archetype || '',
-            background: '',
-            catchphrases,
-            signature_lines: signatureLines,
-            taboos,
-            personality_traits: [],
-            relationships,
-            traits,
-            values,
-            knowledge_bounds: knowledgeBounds,
-          },
+          character_profile: characterProfileOut,
         },
         voice_profile: {
           speaker: selectedSpeaker?.speaker_id || figure?.voice_profile?.speaker,
         },
-        touch_reactions: touchReactionsOut,
       })
 
-      await apiFigures.saveCharacter(id, {
-        name: figureName.trim(),
-        archetype: selectedArchetype?.archetype || figure?.soul_profile?.archetype || '',
-        background: '',
-        catchphrases,
-        signature_lines: signatureLines,
-        taboos,
-        personality_traits: [],
-        relationships,
-        traits,
-        values,
-        knowledge_bounds: knowledgeBounds,
-      })
-
-      showToast('保存成功', 'success')
+      const saved = await apiFigures.get(id)
+      const expectedSpeaker = selectedSpeaker?.speaker_id || figure?.voice_profile?.speaker
+      if (saved.voice_profile?.speaker !== expectedSpeaker) {
+        throw new Error('保存后的声线与所选声线不一致')
+      }
+      if (
+        saved.soul_profile?.address_user_as !== selectedAddress
+        || saved.soul_profile?.character_profile?.address_user_as !== selectedAddress
+      ) {
+        throw new Error('保存后的角色称呼与编辑内容不一致')
+      }
+      setFigure(saved)
+      showToast('保存成功，角色设定已回读确认', 'success')
       setTimeout(() => navigate(`/soul/${id}`), 1000)
     } catch (e: any) {
       setError(e.message || '保存失败')
@@ -334,100 +309,27 @@ export default function EditSoulPage() {
     }
   }
 
-  async function playVoiceSample(speaker: Speaker) {
-    if (playing === speaker.speaker_id) {
-      setPlaying(null)
+  async function playDemoAudio(speaker: Speaker) {
+    if (previewBusy && playingDemo === speaker.speaker_id) {
+      stopVoicePreview()
       return
     }
-    setPlaying(speaker.speaker_id)
-    try {
-      const tempFig = await apiFigures.create({
-        name: '试听',
-        figure_type: 'temp',
-        wake_names: ['试听'],
-        soul_profile: { archetype: '软萌治愈型' },
-        voice_profile: { speaker: speaker.speaker_id },
-      })
-      const sample = TOUCH_REACTIONS_TEMPLATE[0].default
-      const resp = await apiVoice.generate(tempFig.figure_id, sample, speaker.speaker_id)
-      if (resp.audio_url) {
-        const audio = new Audio(resp.audio_url)
-        audio.onended = () => setPlaying(null)
-        audio.onerror = () => setPlaying(null)
-        await audio.play()
-      } else {
-        setPlaying(null)
-      }
-    } catch {
-      setPlaying(null)
-    }
+    await previewVoice({
+      figure_id: id,
+      speaker: speaker.speaker_id,
+      text: '很高兴又见到你。',
+    }, speaker.speaker_id)
   }
 
-  const demoAudioRef = useRef<HTMLAudioElement | null>(null)
-
-  function playDemoAudio(speaker: Speaker) {
-    if (playingDemo === speaker.speaker_id) {
-      demoAudioRef.current?.pause()
-      setPlayingDemo(null)
-      return
-    }
-    if (!speaker.demo_url) {
-      playVoiceSample(speaker)
-      return
-    }
-    if (demoAudioRef.current) {
-      demoAudioRef.current.pause()
-    }
-    setPlayingDemo(speaker.speaker_id)
-    const audio = new Audio(speaker.demo_url)
-    demoAudioRef.current = audio
-    audio.onended = () => setPlayingDemo(null)
-    audio.onerror = () => {
-      setPlayingDemo(null)
-      playVoiceSample(speaker)
-    }
-    audio.play().catch(() => {
-      setPlayingDemo(null)
-    })
-  }
-
-  const availableCategories = useMemo(() => {
-    const set = new Set<string>()
-    speakerCategories.forEach(cat => set.add(cat.category))
-    return Array.from(set).sort()
-  }, [speakerCategories])
-
-  const filteredSpeakers = useMemo(() => {
-    let list = (speakerCategories || []).flatMap(c => c.speakers)
-    if (genderFilter !== 'all') {
-      list = list.filter(s => s.gender === genderFilter)
-    }
-    if (categoryFilter !== 'all') {
-      list = list.filter(s => s.category === categoryFilter)
-    }
-    return list
-  }, [speakerCategories, genderFilter, categoryFilter])
-
-  function openTouchEditModal(key: string) {
-    setEditingTouchKey(key)
-    setEditingTouchReply(touchReactions[key]?.reply || '')
-    setShowTouchEditModal(true)
-  }
-
-  function saveTouchEdit() {
-    if (editingTouchKey) {
-      setTouchReactions({
-        ...touchReactions,
-        [editingTouchKey]: {
-          reply: editingTouchReply,
-          action: ACTION_LABELS[editingTouchKey]?.action || 'short_reply',
-        },
-      })
-      showToast('台词已保存', 'success')
-    }
-    setShowTouchEditModal(false)
-    setEditingTouchKey(null)
-  }
+  const curatedSpeakers = useMemo(() => {
+    const all = (speakerCategories || []).flatMap(category => category.speakers)
+    const ordered = selectedSpeaker
+      ? [selectedSpeaker, ...all]
+      : all
+    return ordered.filter((speaker, index, list) => (
+      list.findIndex(item => item.speaker_id === speaker.speaker_id) === index
+    )).slice(0, 8)
+  }, [selectedSpeaker, speakerCategories])
 
   if (loading) {
     return (
@@ -627,6 +529,8 @@ export default function EditSoulPage() {
                 </div>
                 <button
                   onClick={() => playDemoAudio(selectedSpeaker)}
+                  disabled={previewBusy && playingDemo !== selectedSpeaker.speaker_id}
+                  aria-label={playingDemo === selectedSpeaker.speaker_id ? '停止试听' : '试听当前声线'}
                   className="w-9 h-9 rounded-full bg-gradient-to-br from-purple-500 to-pink-500 text-white flex items-center justify-center"
                 >
                   {playingDemo === selectedSpeaker.speaker_id ? '⏸' : '▶'}
@@ -636,59 +540,29 @@ export default function EditSoulPage() {
             </div>
           )}
 
-          {/* 筛选栏 */}
-          <div className="space-y-2 mb-3">
-            <div className="flex gap-2">
-              {[
-                { k: 'all', l: '全部' },
-                { k: 'female', l: '女声' },
-                { k: 'male', l: '男声' },
-              ].map(t => (
-                <button
-                  key={t.k}
-                  onClick={() => setGenderFilter(t.k as typeof genderFilter)}
-                  className={`chip ${genderFilter === t.k ? 'active' : ''}`}
-                >
-                  {t.l}
-                </button>
-              ))}
-              <select
-                value={categoryFilter}
-                onChange={(e) => setCategoryFilter(e.target.value)}
-                className="flex-1 bg-white/60 border border-purple-200 rounded-full px-3 py-1.5 text-xs text-purple-700 focus:outline-none focus:ring-2 focus:ring-purple-300"
-              >
-                <option value="all">全部分类</option>
-                {availableCategories.map(cat => (
-                  <option key={cat} value={cat}>{cat}</option>
-                ))}
-              </select>
-            </div>
-            <p className="text-[11px] text-purple-400 text-right">
-              共 {filteredSpeakers.length} 个音色
-            </p>
-          </div>
-
-          {/* 音色网格 */}
-          <div className="grid grid-cols-2 gap-2 max-h-[420px] overflow-y-auto pr-1" style={{ WebkitOverflowScrolling: 'touch' }}>
-            {filteredSpeakers.map(speaker => {
+          <div className="grid grid-cols-2 gap-2">
+            {curatedSpeakers.map(speaker => {
               const isSelected = selectedSpeaker?.speaker_id === speaker.speaker_id
               const isPlaying = playingDemo === speaker.speaker_id
               return (
-                <button
+                <div
                   key={speaker.speaker_id}
-                  onClick={() => {
-                    setSelectedSpeaker(speaker)
-                  }}
                   className={`glass-card-light p-3 text-left transition-all ${
                     isSelected ? 'ring-2 ring-purple-400 bg-purple-50' : ''
                   }`}
                 >
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="font-semibold text-purple-900 text-sm truncate">{speaker.name}</span>
-                    {isSelected && (
-                      <div className="w-4 h-4 shrink-0 rounded-full bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center text-white text-[10px]">✓</div>
-                    )}
-                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedSpeaker(speaker)}
+                    className="w-full text-left"
+                  >
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="font-semibold text-purple-900 text-sm truncate">{speaker.name}</span>
+                      {isSelected && (
+                        <div className="w-4 h-4 shrink-0 rounded-full bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center text-white text-[10px]">✓</div>
+                      )}
+                    </div>
+                  </button>
                   <div className="flex flex-wrap gap-1 mb-1.5">
                     <span className="text-[10px] px-1.5 py-0.5 bg-purple-100 text-purple-600 rounded-full">
                       {speaker.gender === 'female' ? '女' : '男'}·{speaker.age_group}
@@ -702,6 +576,7 @@ export default function EditSoulPage() {
                       e.stopPropagation()
                       playDemoAudio(speaker)
                     }}
+                    disabled={previewBusy && !isPlaying}
                     className={`w-full py-1.5 rounded-lg text-xs flex items-center justify-center gap-1 transition-all ${
                       isPlaying ? 'bg-purple-500 text-white' : 'bg-purple-100 text-purple-600 hover:bg-purple-200'
                     }`}
@@ -712,209 +587,9 @@ export default function EditSoulPage() {
                       <>▶ 试听</>
                     )}
                   </button>
-                </button>
+                </div>
               )
             })}
-          </div>
-        </div>
-
-        {/* 声音克隆 */}
-        <div>
-          <h3 className="text-sm font-semibold text-purple-700 mb-2.5">声音复刻</h3>
-          <div className="glass-card p-4">
-            <p className="text-xs text-purple-500 mb-3">
-              上传 15-30 秒清晰音频，生成专属克隆音色
-            </p>
-            
-            {/* 授权声明 */}
-            <label className="flex items-start gap-2 mb-4 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={consentAgreed}
-                onChange={(e) => setConsentAgreed(e.target.checked)}
-                className="mt-0.5 w-4 h-4 text-purple-500 rounded focus:ring-purple-400"
-              />
-              <span className="text-xs text-gray-600 leading-relaxed">
-                我确认上传的音频为本人嗓音，或我已获得权利人的明确授权；我理解使用未经授权的音频（含名人/影视/动漫角色等）所产生的一切法律责任由我本人承担，与平台无关。
-              </span>
-            </label>
-            
-            {/* 音频时长提示 */}
-            {audioDuration !== null && (
-              <div className={`mt-2 px-3 py-2 rounded-xl text-xs ${
-                audioDuration >= 15 && audioDuration <= 30 
-                  ? 'bg-green-50 text-green-600 border border-green-200' 
-                  : 'bg-red-50 text-red-600 border border-red-200'
-              }`}>
-                {audioDuration < 15 && `⚠️ 音频时长 ${audioDuration.toFixed(1)} 秒，太短了，请上传 15-30 秒的音频`}
-                {audioDuration > 30 && `⚠️ 音频时长 ${audioDuration.toFixed(1)} 秒，请控制在 30 秒内`}
-                {audioDuration >= 15 && audioDuration <= 30 && `✅ 音频时长 ${audioDuration.toFixed(1)} 秒，符合要求`}
-              </div>
-            )}
-            
-            {/* 上传区域 */}
-            <label 
-              className={`w-full flex flex-col items-center justify-center py-6 border-2 border-dashed rounded-xl cursor-pointer transition-colors mt-4 ${
-                consentAgreed && (audioDuration === null || (audioDuration >= 15 && audioDuration <= 30))
-                  ? 'border-purple-200 hover:border-purple-400' 
-                  : 'border-gray-200 cursor-not-allowed opacity-50'
-              }`}
-            >
-              <input
-                type="file"
-                accept="audio/*"
-                className="hidden"
-                disabled={!consentAgreed || (audioDuration !== null && (audioDuration < 15 || audioDuration > 30))}
-                onChange={async e => {
-                  const file = e.target.files?.[0]
-                  if (!file) return
-                  
-                  const audio = new Audio(URL.createObjectURL(file))
-                  audio.onloadedmetadata = async () => {
-                    const duration = audio.duration
-                    setAudioDuration(duration)
-                    URL.revokeObjectURL(audio.src)
-                    
-                    if (duration < 15) {
-                      showToast('参考音频太短，请上传 15-30 秒', 'error')
-                      return
-                    }
-                    if (duration > 30) {
-                      showToast('请控制在 30 秒内', 'error')
-                      return
-                    }
-                    
-                    setUploadedAudioName(file.name)
-                    try {
-                      await apiVoice.upload(id!, file, consentAgreed)
-                      showToast('已上传，可开始克隆', 'success')
-                      setCloneStatus('not_cloned')
-                    } catch (err: any) {
-                      showToast(err?.message || '上传失败', 'error')
-                    }
-                  }
-                }}
-              />
-              <span className="text-3xl text-purple-300 mb-2">🎵</span>
-              <span className="text-sm text-purple-600 font-medium">点击选择音频文件</span>
-              <span className="text-xs text-purple-400 mt-1">支持 MP3、WAV 等格式，建议 15-30 秒</span>
-            </label>
-            
-            {uploadedAudioName && (
-              <div className="mt-3 flex items-center gap-2 text-sm text-purple-600">
-                <span>📎</span>
-                <span className="truncate">{uploadedAudioName}</span>
-                {audioDuration !== null && (
-                  <span className="text-xs text-gray-400">({audioDuration.toFixed(1)}秒)</span>
-                )}
-              </div>
-            )}
-            
-            {/* 参考文本输入 + 开始克隆 */}
-            {uploadedAudioName && cloneStatus === 'not_cloned' && (
-              <div className="mt-4 space-y-3">
-                <input
-                  type="text"
-                  placeholder="参考音频里念的话（选填，填了克隆更准）"
-                  value={promptText}
-                  onChange={(e) => setPromptText(e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-purple-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-300"
-                />
-                <button
-                  onClick={async () => {
-                    try {
-                      setCloneStatus('cloning')
-                      await apiVoice.cloneStart(id!, promptText)
-                      showToast('克隆就绪', 'success')
-                      setCloneStatus('ready')
-                    } catch (err: any) {
-                      showToast(err?.message || '克隆失败', 'error')
-                      setCloneStatus('failed')
-                    }
-                  }}
-                  className="w-full py-2 bg-purple-500 text-white text-sm rounded-xl hover:bg-purple-600 transition-colors"
-                >
-                  开始克隆
-                </button>
-              </div>
-            )}
-            
-            {/* 克隆中状态 */}
-            {cloneStatus === 'cloning' && (
-              <div className="mt-4 px-3 py-2 bg-yellow-50 border border-yellow-200 rounded-xl text-xs text-yellow-600">
-                克隆中...
-              </div>
-            )}
-            {cloneStatus === 'ready' && (
-              <div className="mt-4 space-y-3">
-                <div className="px-3 py-2 bg-green-50 border border-green-200 rounded-xl text-xs text-green-600 flex items-center gap-2">
-                  <span>✅</span>
-                  <span>克隆就绪</span>
-                </div>
-                <button
-                  onClick={async () => {
-                    try {
-                      const result = await apiVoice.generate(
-                        id!,
-                        '你好呀，我是你的专属灵偶，以后我就用这个声音陪着你啦。',
-                      )
-                      if (result.audio_path) {
-                        const audio = new Audio(`/api/voice/play?path=${encodeURIComponent(result.audio_path)}`)
-                        audio.play()
-                      }
-                    } catch (err: any) {
-                      showToast(err?.message || '试听失败', 'error')
-                    }
-                  }}
-                  className="w-full py-2 bg-green-500 text-white text-sm rounded-xl hover:bg-green-600 transition-colors"
-                >
-                  🔊 试听克隆音色
-                </button>
-                <p className="text-xs text-gray-400 text-center">已设为该灵偶的声音</p>
-              </div>
-            )}
-            
-            {/* 失败状态 */}
-            {cloneStatus === 'failed' && (
-              <div className="mt-4 space-y-3">
-                <div className="px-3 py-2 bg-red-50 border border-red-200 rounded-xl text-xs text-red-600">
-                  克隆失败，请重试
-                </div>
-                <button
-                  onClick={() => setCloneStatus('not_cloned')}
-                  className="w-full py-2 bg-purple-500 text-white text-sm rounded-xl hover:bg-purple-600 transition-colors"
-                >
-                  重新克隆
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* 触摸反应 */}
-        <div>
-          <h3 className="text-sm font-semibold text-purple-700 mb-2.5">触摸反应</h3>
-          <div className="space-y-2">
-            {TOUCH_REACTIONS_TEMPLATE.map(t => (
-              <div key={t.key} className="glass-card p-3">
-                <div className="flex items-center gap-2 mb-2">
-                  <span className="text-xl">{t.icon}</span>
-                  <span className="font-medium text-purple-900 text-sm flex-1">{t.label}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    value={touchReactions[t.key]?.reply || ''}
-                    onChange={e => setTouchReactions({ ...touchReactions, [t.key]: { ...touchReactions[t.key], reply: e.target.value } })}
-                    className="flex-1 px-3 py-2 bg-white/70 border border-purple-100 rounded-xl text-sm text-purple-900 focus:outline-none focus:ring-2 focus:ring-purple-300"
-                  />
-                  <button
-                    onClick={() => openTouchEditModal(t.key)}
-                    className="w-8 h-8 rounded-full bg-white text-purple-600 flex items-center justify-center shadow-sm border border-purple-100"
-                  >✎</button>
-                </div>
-              </div>
-            ))}
           </div>
         </div>
 
@@ -1190,31 +865,6 @@ export default function EditSoulPage() {
         </div>
       )}
 
-      {/* 触摸编辑弹窗 */}
-      {showTouchEditModal && editingTouchKey && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
-          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowTouchEditModal(false)} />
-          <div className="relative w-full max-w-sm animate-fade-in overflow-hidden rounded-[30px] bg-white/92 p-6 shadow-soul-lg ring-1 ring-white/80">
-            <h3 className="text-lg font-bold text-soul-gradient text-center mb-2">
-              {TOUCH_REACTIONS_TEMPLATE.find(t => t.key === editingTouchKey)?.label}
-            </h3>
-            <textarea
-              value={editingTouchReply}
-              onChange={e => setEditingTouchReply(e.target.value)}
-              rows={3}
-              className="w-full px-3 py-2 bg-white/60 border border-purple-100 rounded-xl text-sm text-purple-900 focus:outline-none focus:ring-2 focus:ring-purple-300 resize-none mb-4"
-            />
-            <div className="flex gap-3">
-              <button onClick={() => setShowTouchEditModal(false)} className="flex-1 py-2.5 bg-white/60 text-purple-600 rounded-xl text-sm font-medium border border-purple-100">
-                取消
-              </button>
-              <button onClick={saveTouchEdit} className="flex-1 py-2.5 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded-xl text-sm font-medium">
-                保存
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

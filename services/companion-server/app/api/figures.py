@@ -9,13 +9,25 @@ project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.auth import get_current_user
-from data.store import save_figure, get_figure, list_figures, delete_figure, get_archetypes
+from app.api.dev_tools import require_dev_tools
+from app.api.ownership import current_user_id
+from data.store import (
+    DataIntegrityError,
+    create_figure_idempotent,
+    delete_figure,
+    get_archetypes,
+    get_figure,
+    list_bases_for_owner,
+    list_figures,
+    save_base,
+    save_figure,
+)
 
 from app.core.life_engine import apply_time_decay, neglect_tier, get_status_description
-from app.core.relationship_engine import init_memory_capsule, boost_relationship, set_streak, RELATIONSHIP_LEVELS, LEVEL_THRESHOLDS
+from app.core.relationship_engine import boost_relationship, set_streak, RELATIONSHIP_LEVELS, LEVEL_THRESHOLDS
 
 router = APIRouter()
 
@@ -26,6 +38,34 @@ def _now_iso() -> str:
 
 def _new_uuid() -> str:
     return str(uuid.uuid4())
+
+
+def _synchronize_persona_address(
+    soul_profile: dict,
+    *,
+    preferred: Optional[str] = None,
+) -> None:
+    character_profile = soul_profile.get("character_profile")
+    character_address = (
+        character_profile.get("address_user_as")
+        if isinstance(character_profile, dict)
+        else None
+    )
+    candidates = (
+        preferred,
+        soul_profile.get("address_user_as"),
+        character_address,
+        "你",
+    )
+    address = "你"
+    for candidate in candidates:
+        normalized = str(candidate or "").strip()[:20]
+        if normalized and normalized != "Eddie":
+            address = normalized
+            break
+    soul_profile["address_user_as"] = address
+    if isinstance(character_profile, dict):
+        character_profile["address_user_as"] = address
 
 
 # ============== Archetype Template Loader ==============
@@ -78,7 +118,11 @@ def _default_emotion_state() -> dict:
 
 # ============== Request Models ==============
 
-class CreateFigureRequest(BaseModel):
+class _StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class CreateFigureRequest(_StrictModel):
     name: str
     avatar_url: Optional[str] = None
     description: Optional[str] = None
@@ -88,9 +132,11 @@ class CreateFigureRequest(BaseModel):
     voice_profile: Optional[dict] = None
     touch_reactions: Optional[dict] = None
     touch_escalation: Optional[dict] = None  # 触摸递进台词
+    creation_request_id: Optional[str] = None
+    activate_base_id: Optional[str] = None
 
 
-class UpdateFigureRequest(BaseModel):
+class UpdateFigureRequest(_StrictModel):
     name: Optional[str] = None
     avatar_url: Optional[str] = None
     description: Optional[str] = None
@@ -104,21 +150,21 @@ class UpdateFigureRequest(BaseModel):
 # ============== API Endpoints ==============
 
 @router.get("")
-def get_figures(current_user: Optional[dict] = Depends(get_current_user)):
+def get_figures(current_user: dict = Depends(get_current_user)):
     """List all figures."""
-    user_id = current_user["user_id"] if current_user else "user_default"
+    user_id = current_user_id(current_user)
     return list_figures(user_id=user_id)
 
 
 @router.post("")
-def create_figure(req: CreateFigureRequest, current_user: Optional[dict] = Depends(get_current_user)):
+def create_figure(req: CreateFigureRequest, current_user: dict = Depends(get_current_user)):
     """
     Create a new figure.
     Bug 1 fix: archetype template drives default touch_reactions / persona / voice.
     Bug 2 fix: emotion_state lives at soul_profile.emotion_state (not persona.emotion_state).
     Priority: explicit request field > archetype template > hard-coded default.
     """
-    user_id = current_user["user_id"] if current_user else "user_default"
+    user_id = current_user_id(current_user)
     figure_id = _new_uuid()
     voice_id = _new_uuid()
     now = _now_iso()
@@ -163,7 +209,6 @@ def create_figure(req: CreateFigureRequest, current_user: Optional[dict] = Depen
         soul_profile.setdefault("name", req.name)
         soul_profile.setdefault("avatar_url", req.avatar_url)
         soul_profile.setdefault("description", req.description or "")
-        soul_profile.setdefault("address_user_as", "主人")
         soul_profile.setdefault("created_at", now)
         soul_profile.setdefault("updated_at", now)
         # emotion_state at soul_profile.emotion_state (Bug 2 fix)
@@ -181,12 +226,13 @@ def create_figure(req: CreateFigureRequest, current_user: Optional[dict] = Depen
             "name": req.name,
             "avatar_url": req.avatar_url,
             "description": req.description or "",
-            "address_user_as": "主人",
+            "address_user_as": "你",
             "persona": tmpl_persona,
             "emotion_state": _default_emotion_state(),  # Bug 2: at soul_profile level
             "created_at": now,
             "updated_at": now,
         }
+    _synchronize_persona_address(soul_profile)
 
     # Build voice_profile: explicit > archetype recommended_voice > default
     # Day 6: add tts_engine + speaker fields
@@ -252,14 +298,13 @@ def create_figure(req: CreateFigureRequest, current_user: Optional[dict] = Depen
     # Memory
     memory = {
         "figure_id": figure_id,
-        "figure_name": req.name,  # 用于 first_meet 胶囊内容
         "interaction_count": 0,
         "last_interaction_at": None,
-        "favorite_responses": [],
+        "confirmed_facts": [],
+        "memory_candidates": [],
+        "memory_tombstones": [],
+        "memory_revision": 0,
     }
-
-    # Phase C: 初始化记忆胶囊和关系（init_memory_capsule 返回更新后的 memory）
-    memory = init_memory_capsule(memory)
 
     # Assemble figure
     figure = {
@@ -279,16 +324,29 @@ def create_figure(req: CreateFigureRequest, current_user: Optional[dict] = Depen
         "memory": memory,
     }
 
-    return save_figure(figure_id, figure, user_id=user_id)
+    try:
+        saved, _created = create_figure_idempotent(
+            figure_id,
+            figure,
+            user_id=user_id,
+            creation_request_id=req.creation_request_id,
+            activate_base_id=req.activate_base_id,
+        )
+    except (DataIntegrityError, ValueError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="创建或激活失败，未完成写入，请检查底座后重试",
+        ) from exc
+    return saved
 
 
 @router.get("/{figure_id}")
-def get_figure_detail(figure_id: str, current_user: Optional[dict] = Depends(get_current_user)):
+def get_figure_detail(figure_id: str, current_user: dict = Depends(get_current_user)):
     """Get a single figure.
     
     Phase B: 应用情绪衰减（懒计算），返回"现在"的情绪状态。
     """
-    user_id = current_user["user_id"] if current_user else "user_default"
+    user_id = current_user_id(current_user)
     figure = get_figure(figure_id, user_id=user_id)
     if not figure:
         raise HTTPException(status_code=404, detail="找不到这个灵偶")
@@ -315,9 +373,9 @@ def get_figure_detail(figure_id: str, current_user: Optional[dict] = Depends(get
 
 
 @router.put("/{figure_id}")
-def update_figure(figure_id: str, req: UpdateFigureRequest, current_user: Optional[dict] = Depends(get_current_user)):
+def update_figure(figure_id: str, req: UpdateFigureRequest, current_user: dict = Depends(get_current_user)):
     """Update a figure."""
-    user_id = current_user["user_id"] if current_user else "user_default"
+    user_id = current_user_id(current_user)
     figure = get_figure(figure_id, user_id=user_id)
     if not figure:
         raise HTTPException(status_code=404, detail="找不到这个灵偶")
@@ -332,6 +390,14 @@ def update_figure(figure_id: str, req: UpdateFigureRequest, current_user: Option
         figure["wake_names"] = req.wake_names
     if req.soul_profile is not None:
         figure["soul_profile"].update(req.soul_profile)
+        incoming_character = req.soul_profile.get("character_profile")
+        preferred_address = req.soul_profile.get("address_user_as")
+        if not preferred_address and isinstance(incoming_character, dict):
+            preferred_address = incoming_character.get("address_user_as")
+        _synchronize_persona_address(
+            figure["soul_profile"],
+            preferred=preferred_address,
+        )
     if req.voice_profile is not None:
         figure["voice_profile"].update(req.voice_profile)
     if req.touch_reactions is not None:
@@ -349,45 +415,63 @@ def update_figure(figure_id: str, req: UpdateFigureRequest, current_user: Option
 
 
 @router.delete("/{figure_id}")
-def delete_figure_endpoint(figure_id: str, current_user: Optional[dict] = Depends(get_current_user)):
+def delete_figure_endpoint(figure_id: str, current_user: dict = Depends(get_current_user)):
     """Delete a figure."""
-    user_id = current_user["user_id"] if current_user else "user_default"
+    user_id = current_user_id(current_user)
+    if not get_figure(figure_id, user_id=user_id):
+        raise HTTPException(status_code=404, detail="找不到这个灵偶")
+    now = _now_iso()
+    for base in list_bases_for_owner(user_id):
+        if base.get("active_figure_id") == figure_id:
+            base["active_figure_id"] = None
+            base["status"] = "bound"
+            base["updated_at"] = now
+            save_base(str(base["base_id"]), base, owner_user_id=user_id)
     deleted = delete_figure(figure_id, user_id=user_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="找不到这个灵偶")
     return {"success": True}
 
 
-class SaveCharacterRequest(BaseModel):
+class SaveCharacterRequest(_StrictModel):
     character_profile: dict
 
 
 @router.put("/{figure_id}/character")
-def save_figure_character(figure_id: str, req: SaveCharacterRequest, current_user: Optional[dict] = Depends(get_current_user)):
+def save_figure_character(figure_id: str, req: SaveCharacterRequest, current_user: dict = Depends(get_current_user)):
     """Save character profile to figure's soul_profile.character_profile."""
-    user_id = current_user["user_id"] if current_user else "user_default"
+    user_id = current_user_id(current_user)
     figure = get_figure(figure_id, user_id=user_id)
     if not figure:
         raise HTTPException(status_code=404, detail="找不到这个灵偶")
 
     soul_profile = figure.get("soul_profile", {})
-    soul_profile["character_profile"] = req.character_profile
+    character_profile = dict(req.character_profile)
+    soul_profile["character_profile"] = character_profile
+    _synchronize_persona_address(
+        soul_profile,
+        preferred=character_profile.get("address_user_as"),
+    )
     figure["soul_profile"] = soul_profile
     figure["updated_at"] = _now_iso()
 
     save_figure(figure_id, figure, user_id=user_id)
 
-    return {"figure_id": figure_id, "character_profile": req.character_profile, "saved": True}
+    return {
+        "figure_id": figure_id,
+        "character_profile": soul_profile["character_profile"],
+        "saved": True,
+    }
 
 
 # ============== Debug Endpoints (Phase B) ==============
 
-class SimulateAbsenceRequest(BaseModel):
+class SimulateAbsenceRequest(_StrictModel):
     hours: float = Field(..., description="模拟离开的小时数")
 
 
 @router.post("/{figure_id}/simulate-absence")
-def simulate_absence(figure_id: str, req: SimulateAbsenceRequest, current_user: Optional[dict] = Depends(get_current_user)):
+def simulate_absence(figure_id: str, req: SimulateAbsenceRequest, current_user: dict = Depends(get_current_user)):
     """
     Phase B: 调试接口 - 模拟离开。
     
@@ -396,7 +480,8 @@ def simulate_absence(figure_id: str, req: SimulateAbsenceRequest, current_user: 
     
     返回更新后的 figure 和 life_status。
     """
-    user_id = current_user["user_id"] if current_user else "user_default"
+    require_dev_tools()
+    user_id = current_user_id(current_user)
     figure = get_figure(figure_id, user_id=user_id)
     if not figure:
         raise HTTPException(status_code=404, detail="找不到这个灵偶")
@@ -437,14 +522,14 @@ def simulate_absence(figure_id: str, req: SimulateAbsenceRequest, current_user: 
 
 # ============== Debug Endpoints (Phase C: Relationship) ==============
 
-class BoostRelationshipRequest(BaseModel):
+class BoostRelationshipRequest(_StrictModel):
     points: Optional[int] = Field(None, description="直接设置的点数")
     level: Optional[str] = Field(None, description="直接设置的等级（陌生/熟悉/依赖/羁绊）")
     streak_days: Optional[int] = Field(None, description="直接设置的连续陪伴天数")
 
 
 @router.post("/{figure_id}/boost-relationship")
-def boost_relationship_endpoint(figure_id: str, req: BoostRelationshipRequest, current_user: Optional[dict] = Depends(get_current_user)):
+def boost_relationship_endpoint(figure_id: str, req: BoostRelationshipRequest, current_user: dict = Depends(get_current_user)):
     """
     Phase C: 调试接口 - 快进关系。
     
@@ -454,7 +539,8 @@ def boost_relationship_endpoint(figure_id: str, req: BoostRelationshipRequest, c
     
     返回更新后的 figure。
     """
-    user_id = current_user["user_id"] if current_user else "user_default"
+    require_dev_tools()
+    user_id = current_user_id(current_user)
     figure = get_figure(figure_id, user_id=user_id)
     if not figure:
         raise HTTPException(status_code=404, detail="找不到这个灵偶")

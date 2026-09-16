@@ -1,11 +1,9 @@
 // pages/BindBasePage.tsx - 屏1：扫码欢迎/绑定（完整状态机）
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { apiBases, BindingStatus } from '../services/api'
+import { apiBases, ApiError, BindingStatus } from '../services/api'
 import StarField from '../components/StarField'
 import LiquidGlassPanel from '../components/LiquidGlassPanel'
-
-const MOCK_USER_ID = 'user_default'
 
 type ToastType = { message: string; type: 'info' | 'error' | 'success' } | null
 
@@ -15,6 +13,7 @@ export default function BindBasePage() {
   // 绑定状态机
   const [bindingStatus, setBindingStatus] = useState<BindingStatus>('unbound')
   const [baseId, setBaseId] = useState<string | null>(null)
+  const [hasCurrentFigure, setHasCurrentFigure] = useState(false)
   
   // 弹窗状态
   const [showScanModal, setShowScanModal] = useState(false)
@@ -23,14 +22,108 @@ export default function BindBasePage() {
   // 操作状态
   const [binding, setBinding] = useState(false)
   const [unbinding, setUnbinding] = useState(false)
+  const [qrPayload, setQrPayload] = useState('')
+  const [scanning, setScanning] = useState(false)
+  const [scannerMessage, setScannerMessage] = useState('')
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const streamRef = useRef<MediaStream | null>(null)
+  const scanTimerRef = useRef<number | null>(null)
   
   // Toast
   const [toast, setToast] = useState<ToastType>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    apiBases.list()
+      .then(bases => {
+        if (cancelled) return
+        const currentBase = bases[0]
+        if (!currentBase) return
+        setBaseId(currentBase.base.base_id)
+        setBindingStatus('bound_to_current_user')
+        setHasCurrentFigure(Boolean(currentBase.figure))
+      })
+      .catch((error: Error) => showToast(error.message || '底座状态加载失败', 'error'))
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => () => stopScanner(), [])
 
   // Toast 自动消失
   function showToast(message: string, type: 'info' | 'error' | 'success' = 'info') {
     setToast({ message, type })
     setTimeout(() => setToast(null), 3000)
+  }
+
+  function stopScanner() {
+    if (scanTimerRef.current !== null) {
+      window.clearTimeout(scanTimerRef.current)
+      scanTimerRef.current = null
+    }
+    streamRef.current?.getTracks().forEach(track => track.stop())
+    streamRef.current = null
+    if (videoRef.current) videoRef.current.srcObject = null
+    setScanning(false)
+  }
+
+  function closeScanModal() {
+    stopScanner()
+    setShowScanModal(false)
+    setScannerMessage('')
+    setQrPayload('')
+  }
+
+  async function startScanner() {
+    const Detector = (window as unknown as {
+      BarcodeDetector?: new (options: { formats: string[] }) => {
+        detect(source: HTMLVideoElement): Promise<Array<{ rawValue?: string }>>
+      }
+    }).BarcodeDetector
+    if (!Detector) {
+      setScannerMessage('当前浏览器不支持直接扫码，请粘贴二维码内容。')
+      return
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setScannerMessage('当前环境无法访问摄像头，请粘贴二维码内容。')
+      return
+    }
+    stopScanner()
+    setScanning(true)
+    setScannerMessage('请将底座二维码放入取景框')
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' } },
+        audio: false,
+      })
+      streamRef.current = stream
+      const video = videoRef.current
+      if (!video) throw new Error('扫码画面初始化失败')
+      video.srcObject = stream
+      await video.play()
+      const detector = new Detector({ formats: ['qr_code'] })
+      const scan = async () => {
+        if (!streamRef.current || !videoRef.current) return
+        try {
+          const codes = await detector.detect(videoRef.current)
+          const value = codes.find(code => code.rawValue)?.rawValue?.trim()
+          if (value) {
+            setQrPayload(value)
+            stopScanner()
+            await handleScanBind(value)
+            return
+          }
+        } catch {
+          setScannerMessage('二维码识别失败，请调整距离或粘贴二维码内容。')
+        }
+        scanTimerRef.current = window.setTimeout(scan, 250)
+      }
+      void scan()
+    } catch (error) {
+      stopScanner()
+      setScannerMessage(error instanceof Error ? error.message : '无法打开摄像头')
+    }
   }
 
   // 扫码绑定
@@ -39,26 +132,25 @@ export default function BindBasePage() {
     try {
       const result = await apiBases.bind({
         qr_token: qrToken,
-        user_id: MOCK_USER_ID,
       })
       
-      if (result.success) {
+      if (result.success && result.base_id) {
         setBindingStatus('bound_to_current_user')
-        setBaseId(result.base_id || 'BASE-001')
-        setShowScanModal(false)
+        setBaseId(result.base_id)
+        setHasCurrentFigure(Boolean(result.base?.active_figure_id))
+        closeScanModal()
         showToast('绑定成功', 'success')
-      } else {
-        // 根据错误码显示不同提示
-        if (result.error_code === 'INVALID_QR_CODE') {
-          showToast('二维码无效，请扫描灵偶底座上的正确二维码。', 'error')
-        } else if (result.error_code === 'BASE_ALREADY_BOUND') {
-          showToast('该底座已绑定，请先解绑或更换底座。', 'error')
-        } else {
-          showToast(result.message || '绑定失败', 'error')
-        }
       }
-    } catch (e: any) {
-      showToast('绑定失败，请检查网络后重试。', 'error')
+    } catch (error) {
+      if (error instanceof ApiError && error.code === 'INVALID_QR_CODE') {
+        showToast('二维码无效，请扫描灵偶底座上的正确二维码。', 'error')
+      } else if (error instanceof ApiError && error.code === 'BASE_ALREADY_BOUND') {
+        showToast('该底座已绑定其他账号。', 'error')
+      } else if (error instanceof ApiError && error.code === 'ACCOUNT_ALREADY_HAS_BASE') {
+        showToast('当前账号已有底座，请先解绑后再配对。', 'error')
+      } else {
+        showToast(error instanceof Error ? error.message : '绑定失败，请检查网络后重试。', 'error')
+      }
     } finally {
       setBinding(false)
     }
@@ -71,17 +163,17 @@ export default function BindBasePage() {
     try {
       const result = await apiBases.unbind({
         base_id: baseId,
-        user_id: MOCK_USER_ID,
       })
       
       if (result.success) {
         setBindingStatus('unbound')
         setBaseId(null)
+        setHasCurrentFigure(false)
         setShowUnbindModal(false)
         showToast('已解绑底座，可重新扫码绑定', 'success')
       }
-    } catch (e: any) {
-      showToast('解绑失败，请检查网络后重试。', 'error')
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : '解绑失败，请检查网络后重试。', 'error')
     } finally {
       setUnbinding(false)
     }
@@ -93,7 +185,7 @@ export default function BindBasePage() {
       showToast('未绑定底座，请先扫码绑定底座。', 'error')
       setShowScanModal(true)
     } else if (bindingStatus === 'bound_to_current_user') {
-      navigate('/create')
+      navigate(hasCurrentFigure ? '/home' : '/create')
     }
   }
 
@@ -185,7 +277,7 @@ export default function BindBasePage() {
             {bindingStatus === 'unbound' ? '绑定灵偶底座' : baseId}
           </p>
           <p className="mb-4 text-xs font-semibold text-purple-400">
-            {bindingStatus === 'unbound' ? '扫描底座二维码后，才会把灵偶绑定到你的设备。' : '底座已就绪，可以创建或切换灵偶。'}
+            {bindingStatus === 'unbound' ? '扫描底座二维码后，才会把灵偶绑定到你的设备。' : '底座已就绪。'}
           </p>
           {/* 底座占位图 */}
           <div className="flex justify-center">
@@ -225,7 +317,7 @@ export default function BindBasePage() {
             {binding
               ? '绑定中…'
               : bindingStatus === 'bound_to_current_user'
-                ? '开始创建灵魂'
+                ? hasCurrentFigure ? '返回当前灵偶' : '开始创建灵偶'
                 : '扫码绑定底座'}
           </span>
           <span>✦</span>
@@ -252,50 +344,68 @@ export default function BindBasePage() {
       {/* 扫码弹窗 */}
       {showScanModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
-          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowScanModal(false)} />
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={closeScanModal} />
           <div className="relative w-full max-w-sm animate-fade-in overflow-hidden rounded-[30px] bg-white/92 p-6 shadow-soul-lg ring-1 ring-white/80">
             <div className="absolute -right-12 -top-12 h-32 w-32 rounded-full bg-purple-200/40 blur-2xl" />
             <div className="relative">
             <h3 className="mb-2 text-center text-lg font-black text-soul-gradient">扫描底座二维码</h3>
             <p className="mb-4 text-center text-sm text-purple-500">请扫描灵偶底座上的二维码完成配对</p>
-            
-            {/* 扫码区占位 */}
-            <div className="mb-4 flex h-32 w-full items-center justify-center rounded-3xl border-2 border-dashed border-purple-200 bg-purple-100/50">
-              <div className="text-center">
-                <span className="text-4xl text-purple-300">📷</span>
-                <p className="text-xs text-purple-400 mt-2">扫码区域（占位）</p>
-              </div>
+
+            <div className="relative mb-4 h-44 w-full overflow-hidden rounded-3xl bg-slate-950">
+              <video
+                ref={videoRef}
+                muted
+                playsInline
+                className={`h-full w-full object-cover ${scanning ? 'opacity-100' : 'opacity-0'}`}
+              />
+              {!scanning && (
+                <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
+                  <span className="text-4xl text-purple-200">⌗</span>
+                  <p className="mt-2 text-xs font-semibold text-purple-100">摄像头尚未开启</p>
+                </div>
+              )}
+              <div className="pointer-events-none absolute inset-5 rounded-2xl border border-white/70 shadow-[0_0_0_999px_rgba(15,23,42,0.18)]" />
             </div>
-            
-            {/* Mock 按钮 - 开发期 */}
-            <div className="space-y-2 mb-4">
-              <p className="text-xs text-purple-400 text-center">开发期 Mock 按钮：</p>
+
+            <p className="mb-3 min-h-4 text-center text-xs text-purple-500">
+              {scannerMessage || '二维码仅用于认领底座，不包含设备事件凭据。'}
+            </p>
+
+            <div className="mb-4 space-y-2">
               <button
-                onClick={() => handleScanBind('VALID_QR_001')}
+                type="button"
+                onClick={scanning ? stopScanner : startScanner}
                 disabled={binding}
-                className="w-full rounded-2xl bg-green-100 py-2 text-sm font-bold text-green-600 transition-colors hover:bg-green-200 disabled:opacity-50"
+                className="w-full rounded-2xl bg-purple-600 py-2.5 text-sm font-bold text-white transition-colors hover:bg-purple-700 disabled:opacity-50"
               >
-                ① 模拟扫描正确二维码
+                {scanning ? '关闭摄像头' : '打开摄像头扫码'}
               </button>
+              <div className="flex items-center gap-2 py-1 text-[11px] font-semibold text-purple-300">
+                <span className="h-px flex-1 bg-purple-100" />
+                <span>或粘贴二维码内容</span>
+                <span className="h-px flex-1 bg-purple-100" />
+              </div>
+              <input
+                value={qrPayload}
+                onChange={event => setQrPayload(event.target.value)}
+                placeholder="lingou://pair?token=..."
+                autoCapitalize="none"
+                autoCorrect="off"
+                className="w-full rounded-2xl border border-purple-100 bg-white/80 px-3 py-2.5 text-sm text-purple-800 outline-none focus:border-purple-300"
+              />
               <button
-                onClick={() => handleScanBind('INVALID_QR')}
-                disabled={binding}
-                className="w-full rounded-2xl bg-red-100 py-2 text-sm font-bold text-red-600 transition-colors hover:bg-red-200 disabled:opacity-50"
+                type="button"
+                onClick={() => handleScanBind(qrPayload.trim())}
+                disabled={binding || !qrPayload.trim()}
+                className="w-full rounded-2xl bg-purple-100 py-2.5 text-sm font-bold text-purple-700 transition-colors hover:bg-purple-200 disabled:opacity-50"
               >
-                ② 模拟无效二维码
-              </button>
-              <button
-                onClick={() => handleScanBind('ALREADY_BOUND_QR')}
-                disabled={binding}
-                className="w-full rounded-2xl bg-orange-100 py-2 text-sm font-bold text-orange-600 transition-colors hover:bg-orange-200 disabled:opacity-50"
-              >
-                ③ 模拟底座已被其他账号绑定
+                {binding ? '正在验证并绑定…' : '验证并绑定'}
               </button>
             </div>
             
             {/* 取消按钮 */}
             <button
-              onClick={() => setShowScanModal(false)}
+              onClick={closeScanModal}
               className="w-full rounded-2xl border border-purple-100 bg-white/70 py-2.5 text-sm font-bold text-purple-600 transition-colors hover:bg-white/90"
             >
               取消

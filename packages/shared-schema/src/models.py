@@ -1,6 +1,8 @@
 # Shared Pydantic models for Lingou Soul Companion
 # Must stay consistent with TypeScript types.ts
 
+from __future__ import annotations
+
 from datetime import datetime
 from enum import Enum
 from typing import Optional, Literal
@@ -128,8 +130,9 @@ class SpeakingStyle(str, Enum):
 # ============== Core Objects ==============
 
 class BaseProfile(BaseModel):
+    schema_version: Literal[2] = 2
+    owner_user_id: str
     base_id: str
-    bound_user_id: str | None = None
     active_figure_id: str | None = None
     status: BaseStatus
     created_at: str
@@ -220,6 +223,8 @@ class VoiceProfile(BaseModel):
 
 
 class FigureProfile(BaseModel):
+    schema_version: Literal[2] = 2
+    owner_user_id: str
     figure_id: str
     name: str
     avatar_url: str | None = None
@@ -245,6 +250,8 @@ class ArchetypeTemplate(BaseModel):
 
 
 class EventLog(BaseModel):
+    schema_version: Literal[2] = 2
+    owner_user_id: str
     event_id: str
     base_id: str
     figure_id: str
@@ -258,7 +265,11 @@ class EventLog(BaseModel):
 
 
 class DialogueLog(BaseModel):
+    schema_version: Literal[2] = 2
+    owner_user_id: str
     dialogue_id: str
+    session_id: str | None = None
+    turn_id: str | None = None
     figure_id: str
     base_id: str
     wake_source: DialogueSource
@@ -272,18 +283,23 @@ class DialogueLog(BaseModel):
 
 
 class SyncQueueItem(BaseModel):
-    item_id: str
+    schema_version: Literal[2] = 2
+    owner_user_id: str
+    queue_id: str
+    figure_id: str
     type: SyncItemType
     data: dict
-    status: SyncItemStatus
+    sync_status: SyncItemStatus
+    created_at: str
+    synced_at: str | None = None
 
 
 class SyncQueue(BaseModel):
-    queue_id: str
-    items: list[SyncQueueItem] = []
-    status: SyncQueueStatus = SyncQueueStatus.pending
+    schema_version: Literal[2] = 2
+    owner_user_id: str
+    items: list[SyncQueueItem] = Field(default_factory=list)
     created_at: str
-    updated_at: str
+    updated_at: str | None = None
 
 
 class DialogueState(BaseModel):
@@ -308,11 +324,16 @@ class EventResponse(BaseModel):
 
 class CreateBaseRequest(BaseModel):
     base_id: str
-    bound_user_id: str | None = None
 
 
-class BindBaseRequest(BaseModel):
-    bound_user_id: str
+class PairBaseRequest(BaseModel):
+    qr_token: str
+
+
+class DeviceEventRequest(BaseModel):
+    event_type: str
+    event_id: str | None = None
+    occurred_at: datetime | None = None
 
 
 class SetActiveFigureRequest(BaseModel):
@@ -323,11 +344,14 @@ class CreateFigureRequest(BaseModel):
     name: str
     avatar_url: str | None = None
     description: str | None = None
-    figure_type: FigureTypeEnum
-    wake_names: list[str]
-    soul_profile: SoulProfile
-    voice_profile: Partial[VoiceProfile] | None = None
-    touch_reactions: TouchReactions
+    figure_type: str
+    wake_names: list[str] = Field(default_factory=list)
+    soul_profile: dict | None = None
+    voice_profile: dict | None = None
+    touch_reactions: dict | None = None
+    touch_escalation: dict | None = None
+    creation_request_id: str | None = None
+    activate_base_id: str | None = None
 
 
 class UpdateFigureRequest(BaseModel):
@@ -335,9 +359,10 @@ class UpdateFigureRequest(BaseModel):
     avatar_url: str | None = None
     description: str | None = None
     wake_names: list[str] | None = None
-    soul_profile: Partial[SoulProfile] | None = None
-    voice_profile: Partial[VoiceProfile] | None = None
-    touch_reactions: Partial[TouchReactions] | None = None
+    soul_profile: dict | None = None
+    voice_profile: dict | None = None
+    touch_reactions: dict | None = None
+    touch_escalation: dict | None = None
 
 
 class SimulateHardwareRequest(BaseModel):
@@ -347,15 +372,15 @@ class SimulateHardwareRequest(BaseModel):
 
 class DialogueWakeRequest(BaseModel):
     base_id: str
-    figure_id: str | None = None
-    trigger: DialogueSource
+    trigger: Literal["voice_wake", "double_tap", "long_press"]
+    text: str | None = None
 
 
 class DialogueTextRequest(BaseModel):
     base_id: str
-    figure_id: str
     text: str
+    brain_mode_override: BrainMode | None = None
 
 
 class BrainModeRequest(BaseModel):
-    mode: BrainMode
+    mode: Literal["online", "offline", "auto"]

@@ -1,0 +1,16 @@
+{
+  "result": "pass",
+  "input_device": 0,
+  "output_device": 1,
+  "input_sample_rate": 16000,
+  "output_sample_rate": 24000,
+  "channels": 1,
+  "sample_format": "s16le",
+  "frames": 25,
+  "bytes": 16000,
+  "frame_lengths": [
+    640
+  ],
+  "peak": 1333,
+  "output_bytes": 4800
+}

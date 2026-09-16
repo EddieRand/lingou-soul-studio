@@ -63,8 +63,9 @@ export type SpeakingStyle = "formal" | "casual" | "cute" | "cool";
 // ============== Core Objects ==============
 
 export interface BaseProfile {
+  schema_version: 2;
+  owner_user_id: string;
   base_id: string;
-  bound_user_id: string | null;
   active_figure_id: string | null;
   status: BaseStatus;
   created_at: string;
@@ -158,6 +159,8 @@ export interface VoiceProfile {
 }
 
 export interface FigureProfile {
+  schema_version: 2;
+  owner_user_id: string;
   figure_id: string;
   name: string;
   avatar_url: string | null;
@@ -183,6 +186,8 @@ export interface ArchetypeTemplate {
 }
 
 export interface EventLog {
+  schema_version: 2;
+  owner_user_id: string;
   event_id: string;
   base_id: string;
   figure_id: string;
@@ -196,7 +201,11 @@ export interface EventLog {
 }
 
 export interface DialogueLog {
+  schema_version: 2;
+  owner_user_id: string;
   dialogue_id: string;
+  session_id?: string;
+  turn_id?: string;
   figure_id: string;
   base_id: string;
   wake_source: DialogueSource;
@@ -210,18 +219,23 @@ export interface DialogueLog {
 }
 
 export interface SyncQueueItem {
-  item_id: string;
+  schema_version: 2;
+  owner_user_id: string;
+  queue_id: string;
+  figure_id: string;
   type: SyncItemType;
   data: Record<string, unknown>;
-  status: SyncItemStatus;
+  sync_status: SyncItemStatus;
+  created_at: string;
+  synced_at?: string;
 }
 
 export interface SyncQueue {
-  queue_id: string;
+  schema_version: 2;
+  owner_user_id: string;
   items: SyncQueueItem[];
-  status: SyncQueueStatus;
   created_at: string;
-  updated_at: string;
+  updated_at?: string;
 }
 
 export interface DialogueState {
@@ -246,11 +260,16 @@ export interface EventResponse {
 
 export interface CreateBaseRequest {
   base_id: string;
-  bound_user_id?: string;
 }
 
-export interface BindBaseRequest {
-  bound_user_id: string;
+export interface PairBaseRequest {
+  qr_token: string;
+}
+
+export interface DeviceEventRequest {
+  event_type: string;
+  event_id?: string;
+  occurred_at?: string;
 }
 
 export interface SetActiveFigureRequest {
@@ -258,14 +277,17 @@ export interface SetActiveFigureRequest {
 }
 
 export interface CreateFigureRequest {
+  creation_request_id?: string;
+  activate_base_id?: string;
   name: string;
   avatar_url?: string;
   description?: string;
-  figure_type: FigureTypeEnum;
-  wake_names: string[];
-  soul_profile: SoulProfile;
-  voice_profile: Partial<VoiceProfile>;
-  touch_reactions: TouchReactions;
+  figure_type: string;
+  wake_names?: string[];
+  soul_profile?: Partial<SoulProfile>;
+  voice_profile?: Partial<VoiceProfile>;
+  touch_reactions?: Partial<TouchReactions>;
+  touch_escalation?: Record<string, unknown>;
 }
 
 export interface UpdateFigureRequest {
@@ -276,6 +298,7 @@ export interface UpdateFigureRequest {
   soul_profile?: Partial<SoulProfile>;
   voice_profile?: Partial<VoiceProfile>;
   touch_reactions?: Partial<TouchReactions>;
+  touch_escalation?: Record<string, unknown>;
 }
 
 export interface SimulateHardwareRequest {
@@ -285,16 +308,16 @@ export interface SimulateHardwareRequest {
 
 export interface DialogueWakeRequest {
   base_id: string;
-  figure_id?: string;
-  trigger: DialogueSource;
+  trigger: Exclude<DialogueSource, "manual_debug">;
+  text?: string;
 }
 
 export interface DialogueTextRequest {
   base_id: string;
-  figure_id: string;
   text: string;
+  brain_mode_override?: BrainMode;
 }
 
 export interface BrainModeRequest {
-  mode: BrainMode;
+  mode: BrainMode | "auto";
 }

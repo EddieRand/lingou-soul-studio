@@ -1,198 +1,254 @@
-# services/companion-server/app/api/sync.py
-import sys
-from pathlib import Path
-from typing import Optional
+"""Owner-derived sync APIs.
 
-project_root = Path(__file__).parent.parent.parent.parent
-sys.path.insert(0, str(project_root))
+The authenticated Bearer subject is the only namespace selector. Client
+payloads cannot select or inject an owner, and legacy migration is unavailable
+through the online API.
+"""
 
-from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel
-from datetime import datetime
+from copy import deepcopy
+from datetime import datetime, timezone
+from typing import Any, Optional
 
-from data.store import (
-    get_sync_queue, append_sync_item, flush_sync_queue,
-    get_cloud_data, save_cloud_data,
-    list_figures, get_figure, save_figure,
-    list_dialogue_logs, save_dialogue_log,
-    list_events, save_event,
-)
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, ConfigDict, Field
+
 from app.api.auth import get_current_user
+from app.api.ownership import current_user_id, owned_base_or_404, owned_figure_or_404
+from data.store import (
+    append_sync_item,
+    flush_sync_queue,
+    get_cloud_data,
+    get_sync_queue,
+    save_cloud_data,
+)
+
 
 router = APIRouter()
+_OWNER_FIELDS = {"user_id", "owner_id", "owner_user_id", "bound_user_id"}
 
 
-class SyncQueueRequest(BaseModel):
+class _StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class SyncQueueRequest(_StrictModel):
     figure_id: str
     type: str
     data: dict
 
 
-class CloudSyncRequest(BaseModel):
-    user_id: str
-    figures: list = []
-    dialogue_logs: list = []
-    events: list = []
+class CloudSyncRequest(_StrictModel):
+    figures: list[dict] = Field(default_factory=list)
+    dialogue_logs: list[dict] = Field(default_factory=list)
+    events: list[dict] = Field(default_factory=list)
     last_sync_at: Optional[str] = None
 
 
-class CloudSyncResponse(BaseModel):
+class CloudSyncResponse(_StrictModel):
     success: bool
     message: str
     synced_at: str
     figures_count: int
     logs_count: int
     events_count: int
-    conflicts: list = []
+    conflicts: list[dict] = Field(default_factory=list)
 
 
-def _resolve_conflict(local, remote, field="updated_at"):
-    local_time = datetime.fromisoformat(local.get(field, "")[:-1] if local.get(field) else "2000-01-01T00:00:00")
-    remote_time = datetime.fromisoformat(remote.get(field, "")[:-1] if remote.get(field) else "2000-01-01T00:00:00")
-    if local_time > remote_time:
-        return "local"
-    return "remote"
+def _validate_record(
+    raw: dict,
+    owner_user_id: str,
+    *,
+    require_figure: bool = False,
+    require_base: bool = False,
+) -> dict:
+    if any(field in raw for field in _OWNER_FIELDS):
+        raise HTTPException(status_code=422, detail="同步记录不能包含归属字段")
+    record = deepcopy(raw)
+    figure_id = record.get("figure_id")
+    base_id = record.get("base_id")
+    if require_figure and not figure_id:
+        raise HTTPException(status_code=422, detail="同步记录缺少 figure_id")
+    if require_base and not base_id:
+        raise HTTPException(status_code=422, detail="同步记录缺少 base_id")
+    if figure_id:
+        owned_figure_or_404(str(figure_id), owner_user_id)
+    if base_id:
+        owned_base_or_404(str(base_id), owner_user_id)
+    record["schema_version"] = 2
+    record["owner_user_id"] = owner_user_id
+    return record
 
 
-@router.get("")
-def get_sync_queue_endpoint(user_id: Optional[str] = None):
-    """Return current sync queue."""
-    return get_sync_queue(user_id=user_id)
+def _replace_or_append(records: list[dict], incoming: dict, key: str) -> None:
+    incoming_id = incoming.get(key)
+    if not incoming_id:
+        raise HTTPException(status_code=422, detail=f"同步记录缺少 {key}")
+    for index, existing in enumerate(records):
+        if existing.get(key) == incoming_id:
+            records[index] = incoming
+            return
+    records.append(incoming)
 
 
-@router.post("")
-def queue_sync_item(req: SyncQueueRequest, user_id: Optional[str] = None):
-    """
-    Append a new item to the sync queue.
-    Items are stored locally when offline and flushed when online.
-    """
-    queue = append_sync_item(req.figure_id, req.type, req.data, user_id=user_id)
-    return queue
+def _parse_timestamp(value: Optional[str]) -> Optional[datetime]:
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="last_sync_at 不是合法时间") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
-@router.post("/flush")
-def flush_sync_queue_endpoint(queue_id: Optional[str] = None, user_id: Optional[str] = None):
-    """
-    Mark pending items as synced.
-    If queue_id provided, flush that item only; otherwise flush all pending.
-    """
-    queue = flush_sync_queue(queue_id, user_id=user_id)
-    return queue
+def _newer_than(record: dict, field: str, threshold: Optional[datetime]) -> bool:
+    if threshold is None:
+        return True
+    raw = record.get(field)
+    if not raw:
+        return False
+    try:
+        value = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    return value.astimezone(timezone.utc) > threshold
 
 
-@router.post("/upload")
-def upload_to_cloud(req: CloudSyncRequest):
-    """
-    Upload local data to cloud.
-    Handles conflicts by keeping the newer version.
-    """
-    user_id = req.user_id
-    if not user_id:
-        raise HTTPException(status_code=400, detail="user_id is required")
+def _upload(request: CloudSyncRequest, owner_user_id: str) -> CloudSyncResponse:
+    cloud = get_cloud_data(owner_user_id)
+    figures = list(cloud.get("figures", []))
+    logs = list(cloud.get("dialogue_logs", []))
+    events = list(cloud.get("events", []))
 
-    cloud_data = get_cloud_data(user_id)
-    conflicts = []
+    for raw in request.figures:
+        _replace_or_append(
+            figures,
+            _validate_record(raw, owner_user_id, require_figure=True),
+            "figure_id",
+        )
+    for raw in request.dialogue_logs:
+        _replace_or_append(
+            logs,
+            _validate_record(raw, owner_user_id, require_figure=True),
+            "dialogue_id",
+        )
+    for raw in request.events:
+        _replace_or_append(
+            events,
+            _validate_record(
+                raw,
+                owner_user_id,
+                require_figure=True,
+                require_base=True,
+            ),
+            "event_id",
+        )
 
-    for figure in req.figures:
-        figure_id = figure.get("figure_id")
-        existing = next((f for f in cloud_data.get("figures", []) if f.get("figure_id") == figure_id), None)
-        if existing:
-            winner = _resolve_conflict(figure, existing)
-            if winner == "local":
-                idx = cloud_data["figures"].index(existing)
-                cloud_data["figures"][idx] = figure
-            else:
-                conflicts.append({"type": "figure", "figure_id": figure_id, "resolved_by": "remote"})
-        else:
-            cloud_data.setdefault("figures", []).append(figure)
-
-    for log in req.dialogue_logs:
-        cloud_data.setdefault("dialogue_logs", []).append(log)
-
-    for event in req.events:
-        cloud_data.setdefault("events", []).append(event)
-
-    save_cloud_data(user_id, cloud_data)
-
+    saved = save_cloud_data(
+        owner_user_id,
+        {
+            "schema_version": 2,
+            "owner_user_id": owner_user_id,
+            "figures": figures,
+            "dialogue_logs": logs,
+            "events": events,
+        },
+    )
     return CloudSyncResponse(
         success=True,
         message="Upload completed",
-        synced_at=datetime.utcnow().isoformat(),
-        figures_count=len(cloud_data.get("figures", [])),
-        logs_count=len(cloud_data.get("dialogue_logs", [])),
-        events_count=len(cloud_data.get("events", [])),
-        conflicts=conflicts,
+        synced_at=str(saved["synced_at"]),
+        figures_count=len(figures),
+        logs_count=len(logs),
+        events_count=len(events),
+        conflicts=[],
     )
 
 
-@router.post("/download")
-def download_from_cloud(user_id: str, last_sync_at: Optional[str] = None):
-    """
-    Download cloud data to local.
-    Returns data newer than last_sync_at if provided.
-    """
-    cloud_data = get_cloud_data(user_id)
-    
-    result = {
-        "user_id": user_id,
-        "figures": cloud_data.get("figures", []),
-        "dialogue_logs": cloud_data.get("dialogue_logs", []),
-        "events": cloud_data.get("events", []),
-        "synced_at": cloud_data.get("synced_at"),
-        "total_figures": len(cloud_data.get("figures", [])),
-        "total_logs": len(cloud_data.get("dialogue_logs", [])),
-        "total_events": len(cloud_data.get("events", [])),
+def _download(owner_user_id: str, last_sync_at: Optional[str]) -> dict[str, Any]:
+    threshold = _parse_timestamp(last_sync_at)
+    cloud = get_cloud_data(owner_user_id)
+    figures = [
+        item for item in cloud.get("figures", [])
+        if _newer_than(item, "updated_at", threshold)
+    ]
+    logs = [
+        item for item in cloud.get("dialogue_logs", [])
+        if _newer_than(item, "created_at", threshold)
+    ]
+    events = [
+        item for item in cloud.get("events", [])
+        if _newer_than(item, "triggered_at", threshold)
+    ]
+    return {
+        "figures": figures,
+        "dialogue_logs": logs,
+        "events": events,
+        "synced_at": cloud.get("synced_at"),
+        "total_figures": len(cloud.get("figures", [])),
+        "total_logs": len(cloud.get("dialogue_logs", [])),
+        "total_events": len(cloud.get("events", [])),
     }
 
-    if last_sync_at:
-        try:
-            sync_time = datetime.fromisoformat(last_sync_at[:-1])
-            result["figures"] = [f for f in result["figures"] 
-                                if datetime.fromisoformat(f.get("updated_at", "")[:-1]) > sync_time]
-            result["dialogue_logs"] = [l for l in result["dialogue_logs"]
-                                      if datetime.fromisoformat(l.get("created_at", "")[:-1]) > sync_time]
-            result["events"] = [e for e in result["events"]
-                                if datetime.fromisoformat(e.get("triggered_at", "")[:-1]) > sync_time]
-        except:
-            pass
 
-    return result
+@router.get("")
+def get_sync_queue_endpoint(current_user: dict = Depends(get_current_user)):
+    return get_sync_queue(user_id=current_user_id(current_user))
+
+
+@router.post("")
+def queue_sync_item(
+    request: SyncQueueRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    owner_user_id = current_user_id(current_user)
+    owned_figure_or_404(request.figure_id, owner_user_id)
+    if any(field in request.data for field in _OWNER_FIELDS):
+        raise HTTPException(status_code=422, detail="同步记录不能包含归属字段")
+    return append_sync_item(
+        request.figure_id,
+        request.type,
+        request.data,
+        user_id=owner_user_id,
+    )
+
+
+@router.post("/flush")
+def flush_sync_queue_endpoint(
+    queue_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    return flush_sync_queue(queue_id, user_id=current_user_id(current_user))
+
+
+@router.post("/upload", response_model=CloudSyncResponse)
+def upload_to_cloud(
+    request: CloudSyncRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    return _upload(request, current_user_id(current_user))
+
+
+@router.post("/download")
+def download_from_cloud(
+    last_sync_at: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    return _download(current_user_id(current_user), last_sync_at)
 
 
 @router.post("/sync")
-def full_sync(req: CloudSyncRequest):
-    """
-    Full sync: upload local changes, then download cloud changes.
-    Returns merged data.
-    """
-    upload_result = upload_to_cloud(req)
-    download_result = download_from_cloud(req.user_id)
-
+def full_sync(
+    request: CloudSyncRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    owner_user_id = current_user_id(current_user)
+    upload = _upload(request, owner_user_id)
     return {
-        "upload": upload_result,
-        "download": download_result,
+        "upload": upload,
+        "download": _download(owner_user_id, request.last_sync_at),
         "message": "Full sync completed",
-    }
-
-
-@router.post("/migrate")
-def migrate_local_data(user_id: str):
-    """
-    Migrate existing local data (without user_id) to user-specific storage.
-    """
-    local_figures = list_figures(user_id=None)
-    migrated = 0
-    
-    for figure in local_figures:
-        figure_id = figure.get("figure_id")
-        existing = get_figure(figure_id, user_id=user_id)
-        if not existing:
-            save_figure(figure_id, figure, user_id=user_id)
-            migrated += 1
-
-    return {
-        "success": True,
-        "migrated_count": migrated,
-        "total_local": len(local_figures),
-        "message": f"Migrated {migrated} figures to user {user_id}",
     }

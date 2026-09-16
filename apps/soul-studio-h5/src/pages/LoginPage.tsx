@@ -1,11 +1,10 @@
 import { useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { apiAuth } from '../services/api'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
+
 import { useAuth } from '../context/AuthContext'
 import { getPostLoginPath } from '../utils/onboarding'
 
 type LoginViewState = 'cover' | 'loginSheet' | 'loggingIn'
-type LoginProvider = 'wechat' | 'apple'
 
 const stars = Array.from({ length: 18 }).map((_, index) => ({
   id: index,
@@ -84,23 +83,6 @@ function CheckIcon() {
   )
 }
 
-function WechatIcon() {
-  return (
-    <svg viewBox="0 0 32 32" className="h-6 w-6" fill="currentColor" aria-hidden="true">
-      <path d="M12.6 6.1C7.3 6.1 3 9.7 3 14.2c0 2.4 1.3 4.6 3.4 6.1l-.8 2.6 3-1.5c1.2.4 2.5.7 4 .7h.6a7.8 7.8 0 0 1-.4-2.4c0-4.3 3.9-7.9 8.7-8.2-1.1-3.1-4.6-5.4-8.9-5.4Zm-3.4 4.5a1.3 1.3 0 1 1 0 2.6 1.3 1.3 0 0 1 0-2.6Zm6.3 0a1.3 1.3 0 1 1 0 2.6 1.3 1.3 0 0 1 0-2.6Z" />
-      <path d="M22.1 13.1c-4 0-7.2 2.8-7.2 6.2s3.2 6.2 7.2 6.2c1 0 2-.2 2.9-.5l2.3 1.2-.6-2c1.6-1.2 2.6-2.9 2.6-4.9 0-3.4-3.2-6.2-7.2-6.2Zm-2.3 3.5a1.1 1.1 0 1 1 0 2.1 1.1 1.1 0 0 1 0-2.1Zm5 0a1.1 1.1 0 1 1 0 2.1 1.1 1.1 0 0 1 0-2.1Z" />
-    </svg>
-  )
-}
-
-function AppleIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="h-6 w-6" fill="currentColor" aria-hidden="true">
-      <path d="M18.7 19.5c-.8 1.2-1.7 2.4-3 2.5-1.4 0-1.8-.8-3.3-.8s-2 .8-3.3.8c-1.3.1-2.3-1.3-3.1-2.5-1.7-2.5-3-7.1-1.3-10.1.9-1.5 2.4-2.5 4.1-2.5 1.3 0 2.5.9 3.3.9.8 0 2.3-1.1 3.8-.9.7 0 2.5.3 3.6 2-.1.1-2.2 1.3-2.1 3.8 0 3 2.6 4 2.7 4-.1.1-.4 1.5-1.4 2.8ZM13 3.5C13.7 2.7 14.9 2 15.9 2c.1 1.2-.3 2.4-1 3.2-.7.9-1.8 1.5-3 1.4-.1-1.1.4-2.3 1.1-3.1Z" />
-    </svg>
-  )
-}
-
 function Toast({ message }: { message: string }) {
   if (!message) return null
   return <div className="login-toast" role="status">{message}</div>
@@ -108,46 +90,68 @@ function Toast({ message }: { message: string }) {
 
 interface GlassLoginSheetProps {
   agreed: boolean
-  viewState: LoginViewState
-  provider: LoginProvider | null
+  username: string
+  password: string
+  loggingIn: boolean
+  onUsernameChange: (value: string) => void
+  onPasswordChange: (value: string) => void
   onToggleAgree: () => void
-  onLogin: (provider: LoginProvider) => void
+  onSubmit: (event: React.FormEvent) => void
   onProtocol: (type: 'user' | 'privacy') => void
 }
 
 function GlassLoginSheet({
   agreed,
-  viewState,
-  provider,
+  username,
+  password,
+  loggingIn,
+  onUsernameChange,
+  onPasswordChange,
   onToggleAgree,
-  onLogin,
+  onSubmit,
   onProtocol,
 }: GlassLoginSheetProps) {
-  const loggingIn = viewState === 'loggingIn'
-
   return (
-    <section className="login-sheet" onClick={event => event.stopPropagation()} aria-label="登录面板">
-      <button
-        type="button"
-        className="login-oauth-button login-oauth-button--wechat"
-        onClick={() => onLogin('wechat')}
-        disabled={loggingIn}
-      >
-        <WechatIcon />
-        <span>{loggingIn && provider === 'wechat' ? '正在唤起微信...' : '微信登录'}</span>
-        {loggingIn && provider === 'wechat' && <span className="login-button-spinner" />}
-      </button>
+    <section className="login-sheet" onClick={event => event.stopPropagation()} aria-label="账号登录面板">
+      <div className="login-sheet-heading">
+        <p>欢迎回来</p>
+        <span>使用你的灵偶账号继续</span>
+      </div>
 
-      <button
-        type="button"
-        className="login-oauth-button login-oauth-button--apple"
-        onClick={() => onLogin('apple')}
-        disabled={loggingIn}
-      >
-        <AppleIcon />
-        <span>{loggingIn && provider === 'apple' ? '正在唤起 Apple...' : 'Apple 登录'}</span>
-        {loggingIn && provider === 'apple' && <span className="login-button-spinner login-button-spinner--dark" />}
-      </button>
+      <form className="login-account-form" onSubmit={onSubmit}>
+        <label>
+          <span>用户名或邮箱</span>
+          <input
+            type="text"
+            value={username}
+            onChange={event => onUsernameChange(event.target.value)}
+            autoComplete="username"
+            autoCapitalize="none"
+            disabled={loggingIn}
+            required
+          />
+        </label>
+        <label>
+          <span>密码</span>
+          <input
+            type="password"
+            value={password}
+            onChange={event => onPasswordChange(event.target.value)}
+            autoComplete="current-password"
+            disabled={loggingIn}
+            required
+          />
+        </label>
+
+        <button type="submit" className="login-account-submit" disabled={loggingIn}>
+          <span>{loggingIn ? '正在登录…' : '登录'}</span>
+          {loggingIn && <span className="login-button-spinner" />}
+        </button>
+      </form>
+
+      <p className="login-register-link">
+        还没有账号？<Link to="/register">创建账号</Link>
+      </p>
 
       <div className="login-agreement">
         <button
@@ -171,77 +175,63 @@ function GlassLoginSheet({
 
 export default function LoginPage() {
   const navigate = useNavigate()
-  const { refresh } = useAuth()
+  const location = useLocation()
+  const { login } = useAuth()
   const [viewState, setViewState] = useState<LoginViewState>('cover')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
   const [agreed, setAgreed] = useState(false)
   const [toast, setToast] = useState('')
-  const [provider, setProvider] = useState<LoginProvider | null>(null)
 
   const coverOnly = viewState === 'cover'
   const showSheet = viewState === 'loginSheet' || viewState === 'loggingIn'
-  const statusText = useMemo(() => {
-    if (viewState === 'loggingIn') return '正在进入 Soul Studio...'
-    return '轻触屏幕，进入 Soul Studio'
-  }, [viewState])
+  const statusText = useMemo(() => (
+    viewState === 'loggingIn' ? '正在进入 Soul Studio…' : '轻触屏幕，进入 Soul Studio'
+  ), [viewState])
 
   function showToast(message: string) {
     setToast(message)
-    window.setTimeout(() => setToast(current => (current === message ? '' : current)), 1800)
+    window.setTimeout(() => setToast(current => (current === message ? '' : current)), 2400)
   }
 
   function handlePageClick() {
     if (viewState === 'cover') {
       setViewState('loginSheet')
-      return
-    }
-    if (viewState === 'loginSheet') {
+    } else if (viewState === 'loginSheet') {
       setViewState('cover')
     }
   }
 
-  async function handleLogin(nextProvider: LoginProvider) {
+  async function handleLogin(event: React.FormEvent) {
+    event.preventDefault()
     if (viewState === 'loggingIn') return
-
     if (!agreed) {
       showToast('请先阅读并同意用户协议和隐私政策')
       return
     }
+    if (!username.trim() || !password) {
+      showToast('请输入用户名和密码')
+      return
+    }
 
-    setProvider(nextProvider)
     setViewState('loggingIn')
-    showToast(nextProvider === 'wechat' ? '正在唤起微信登录…' : '正在唤起 Apple 登录…')
-
     try {
-      const result = nextProvider === 'wechat'
-        ? await apiAuth.wechatLogin()
-        : await apiAuth.appleLogin()
-
-      localStorage.setItem('lingou_token', result.access_token)
-      localStorage.setItem('lingou_user_id', result.user_id)
-      localStorage.setItem('lingou_username', result.username)
-
-      // 更新 AuthContext 状态
-      await refresh()
-
-      showToast('登录成功')
-      window.setTimeout(() => navigate(getPostLoginPath(), { replace: true }), 600)
-    } catch (e: any) {
-      showToast(e.message || '登录失败，请重试')
+      await login(username.trim(), password)
+      const requestedPath = (location.state as { from?: string } | null)?.from
+      const destination = requestedPath?.startsWith('/') ? requestedPath : getPostLoginPath()
+      navigate(destination, { replace: true })
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : '登录失败，请重试')
       setViewState('loginSheet')
-      setProvider(null)
     }
   }
 
   function handleProtocol(type: 'user' | 'privacy') {
-    console.log(type === 'user' ? '用户协议' : '隐私政策')
     showToast(type === 'user' ? '用户协议暂未接入' : '隐私政策暂未接入')
   }
 
   return (
-    <main
-      className={`login-page ${showSheet ? 'login-page--sheet-open' : ''}`}
-      onClick={handlePageClick}
-    >
+    <main className={`login-page ${showSheet ? 'login-page--sheet-open' : ''}`} onClick={handlePageClick}>
       <section className="login-phone-shell" aria-label="灵偶登录页">
         <div className="login-bg" />
         <div className="login-vignette" />
@@ -256,10 +246,13 @@ export default function LoginPage() {
         {showSheet && (
           <GlassLoginSheet
             agreed={agreed}
-            viewState={viewState}
-            provider={provider}
+            username={username}
+            password={password}
+            loggingIn={viewState === 'loggingIn'}
+            onUsernameChange={setUsername}
+            onPasswordChange={setPassword}
             onToggleAgree={() => setAgreed(value => !value)}
-            onLogin={handleLogin}
+            onSubmit={handleLogin}
             onProtocol={handleProtocol}
           />
         )}

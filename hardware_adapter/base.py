@@ -1,6 +1,8 @@
 # hardware_adapter/base.py
 # Abstract base class for hardware adapters
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from typing import Optional
 

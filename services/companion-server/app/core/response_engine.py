@@ -24,6 +24,7 @@ Phase D: 触摸递进反应
 - 从 touch_escalation 选择对应台词
 """
 
+import os
 import random
 import sys
 from pathlib import Path
@@ -33,7 +34,7 @@ from typing import Optional
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from data.store import get_base, get_figure, save_figure
+from data.store import get_base_for_owner, get_figure, save_figure
 
 from app.core.emotion_engine import apply_emotion_delta
 from app.core.life_engine import (
@@ -55,6 +56,15 @@ LED_EFFECTS = {
 
 # Touch escalation threshold (seconds)
 TOUCH_ESCALATION_WINDOW = 60  # 60秒内同一动作触发递进
+
+
+def deferred_gameplay_enabled() -> bool:
+    return os.getenv("LINGOU_ENABLE_DEFERRED_GAMEPLAY", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _update_touch_streak(figure: dict, event_type: str) -> int:
@@ -144,7 +154,12 @@ def _pick_escalation_line(figure: dict, event_type: str, tier: int) -> str:
     return "……"
 
 
-def generate_touch_response(base_id: str, event_type: str) -> Optional[dict]:
+def generate_touch_response(
+    base_id: str,
+    event_type: str,
+    *,
+    owner_user_id: str,
+) -> Optional[dict]:
     """
     Main entry point for touch event processing.
     Returns an EventResponse dict or None if figure not found.
@@ -153,7 +168,7 @@ def generate_touch_response(base_id: str, event_type: str) -> Optional[dict]:
     Phase D: 其他触摸事件使用递进反应
     """
     # 1. Get base and resolve active figure
-    base = get_base(base_id)
+    base = get_base_for_owner(base_id, owner_user_id)
     if not base:
         return None
 
@@ -162,14 +177,27 @@ def generate_touch_response(base_id: str, event_type: str) -> Optional[dict]:
         return None
 
     # 2. Load figure
-    owner = base.get("bound_user_id")
-    figure = get_figure(figure_id, user_id=owner)
+    figure = get_figure(figure_id, user_id=owner_user_id)
     if not figure:
         return None
 
+    if not deferred_gameplay_enabled():
+        return _generate_mvp_touch_response(
+            base_id,
+            figure_id,
+            figure,
+            event_type,
+            owner_user_id,
+        )
+
     # Phase B: figure_placed 重逢反应
     if event_type == "figure_placed":
-        return _generate_reunion_response(base_id, figure_id, figure, owner)
+        return _generate_reunion_response(
+            base_id,
+            figure_id,
+            figure,
+            owner_user_id,
+        )
     
     # Phase D: 触摸递进反应
     # 3. Update touch streak and get tier
@@ -210,11 +238,13 @@ def generate_touch_response(base_id: str, event_type: str) -> Optional[dict]:
     soul = figure.get("soul_profile", {})
     soul["emotion_state"] = updated_mood
     soul["updated_at"] = now_iso
+    figure["soul_profile"] = soul
+    figure["memory"] = memory
 
     figure["updated_at"] = now_iso
 
     # 8. Save updated figure
-    save_figure(figure_id, figure, user_id=owner)
+    save_figure(figure_id, figure, user_id=owner_user_id)
 
     # 9. Build response
     voice_id = figure.get("voice_profile", {}).get("voice_id", "")
@@ -233,7 +263,58 @@ def generate_touch_response(base_id: str, event_type: str) -> Optional[dict]:
     }
 
 
-def _generate_reunion_response(base_id: str, figure_id: str, figure: dict, user_id: Optional[str] = None) -> dict:
+def _generate_mvp_touch_response(
+    base_id: str,
+    figure_id: str,
+    figure: dict,
+    event_type: str,
+    user_id: str,
+) -> dict:
+    """Keep physical touch feedback without deferred relationship mechanics."""
+    reply = _pick_escalation_line(figure, event_type, 1)
+    current_mood = dict(
+        figure.get("soul_profile", {}).get(
+            "emotion_state",
+            {
+                "happy": 50,
+                "lonely": 0,
+                "attached": 0,
+                "annoyed": 0,
+                "attention": 0,
+                "sleepy": 0,
+                "last_dialogue_at": None,
+            },
+        )
+    )
+    now_iso = datetime.utcnow().isoformat()
+    memory = figure.get("memory", {})
+    memory["figure_id"] = figure_id
+    memory["interaction_count"] = memory.get("interaction_count", 0) + 1
+    memory["last_interaction_at"] = now_iso
+    figure["memory"] = memory
+    figure["updated_at"] = now_iso
+    save_figure(figure_id, figure, user_id=user_id)
+    return {
+        "base_id": base_id,
+        "figure_id": figure_id,
+        "event": event_type,
+        "reply": reply,
+        "mood_before": current_mood,
+        "mood": current_mood,
+        "voice_profile_id": figure.get("voice_profile", {}).get("voice_id", ""),
+        "led_effect": LED_EFFECTS.get(event_type),
+        "touch_tier": 1,
+        "touch_streak": 1,
+        "deferred_gameplay": False,
+    }
+
+
+def _generate_reunion_response(
+    base_id: str,
+    figure_id: str,
+    figure: dict,
+    user_id: str,
+) -> dict:
     """
     Phase B: figure_placed 重逢反应。
     
@@ -270,6 +351,8 @@ def _generate_reunion_response(base_id: str, figure_id: str, figure: dict, user_
     soul = figure.get("soul_profile", {})
     soul["emotion_state"] = reunion_emotion
     soul["updated_at"] = now_iso
+    figure["soul_profile"] = soul
+    figure["memory"] = memory
     
     figure["updated_at"] = now_iso
     

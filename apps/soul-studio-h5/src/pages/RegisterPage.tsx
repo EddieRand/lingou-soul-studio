@@ -27,8 +27,13 @@ export default function RegisterPage() {
       return
     }
 
-    if (password.length < 6) {
-      setError('密码至少需要6位')
+    if (password.length < 8) {
+      setError('密码至少需要8位')
+      return
+    }
+
+    if (new TextEncoder().encode(password).length > 72) {
+      setError('密码的 UTF-8 编码不能超过72字节')
       return
     }
 
@@ -63,6 +68,7 @@ export default function RegisterPage() {
               onChange={(e) => setUsername(e.target.value)}
               className="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-xl text-white placeholder-purple-300 focus:outline-none focus:border-purple-400 transition-colors"
               placeholder="请输入用户名"
+              autoComplete="username"
               disabled={loading}
             />
           </div>
@@ -75,6 +81,7 @@ export default function RegisterPage() {
               onChange={(e) => setEmail(e.target.value)}
               className="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-xl text-white placeholder-purple-300 focus:outline-none focus:border-purple-400 transition-colors"
               placeholder="请输入邮箱"
+              autoComplete="email"
               disabled={loading}
             />
           </div>
@@ -86,7 +93,9 @@ export default function RegisterPage() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               className="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-xl text-white placeholder-purple-300 focus:outline-none focus:border-purple-400 transition-colors"
-              placeholder="请输入密码（至少6位）"
+              placeholder="请输入密码（至少8位）"
+              autoComplete="new-password"
+              minLength={8}
               disabled={loading}
             />
           </div>
@@ -99,6 +108,8 @@ export default function RegisterPage() {
               onChange={(e) => setConfirmPassword(e.target.value)}
               className="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-xl text-white placeholder-purple-300 focus:outline-none focus:border-purple-400 transition-colors"
               placeholder="请再次输入密码"
+              autoComplete="new-password"
+              minLength={8}
               disabled={loading}
             />
           </div>

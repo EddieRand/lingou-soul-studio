@@ -19,6 +19,7 @@ _GREETING_KEYWORDS = ["你好", "在吗", "在不在", "嗨", "哈喽", "嘿", "
 _CUTE_KEYWORDS = ["可爱", "漂亮", "好看", "萌", "喜欢你", "爱"]
 _BORED_KEYWORDS = ["无聊", "没事干", "干嘛", "干什么", "干嘛呢"]
 _INTEREST_KEYWORDS = ["喜欢", "爱", "想你", "想念"]
+_IDENTITY_KEYWORDS = ["你是ai", "你是不是ai", "人工智能", "机器人", "程序"]
 
 
 # Archetype-specific reply banks (fallback when voice pool not available)
@@ -103,6 +104,9 @@ def _get_archetype_replies(archetype: str, category: str) -> list:
 def _detect_intent(text: str) -> str:
     """Detect intent category from user text."""
     t = text.lower()
+    for kw in _IDENTITY_KEYWORDS:
+        if kw in t:
+            return "identity"
     for kw in _INTEREST_KEYWORDS:
         if kw in t:
             return "interest"
@@ -121,17 +125,28 @@ def _detect_intent(text: str) -> str:
     return "default"
 
 
-def generate_offline_reply(figure: dict, user_input_text: str) -> str:
+def generate_offline_reply(
+    figure: dict,
+    user_input_text: str,
+    *,
+    voice_pool_key: str | None = None,
+) -> str:
     """
     Generate a short offline reply (≤30 chars).
     Input: figure dict (needs archetype, speaking_style, address_user_as, soul_profile)
     If voice pool is precached for the figure, picks from pool texts instead of hardcoded banks.
     """
-    figure_id = figure.get("figure_id", "")
+    # Runtime callers provide the owner-scoped storage key. Falling back to the
+    # raw figure id keeps this pure helper usable for owner-less fixtures, but
+    # authenticated dialogue never shares this cache namespace across users.
+    figure_id = voice_pool_key or figure.get("figure_id", "")
     archetype = figure.get("soul_profile", {}).get("archetype", "软萌治愈型")
     speaking_style = figure.get("soul_profile", {}).get("persona", {}).get("speaking_style", "cute")
-    address_user_as = figure.get("soul_profile", {}).get("address_user_as", "主人")
+    address_user_as = figure.get("soul_profile", {}).get("address_user_as", "你")
     intent = _detect_intent(user_input_text)
+    if intent == "identity":
+        figure_name = str(figure.get("name") or "灵偶")[:8]
+        return f"我是由AI驱动的灵偶{figure_name}，会用自己的方式陪你。"
 
     # Try voice pool first if precached
     if figure_id and _pool_is_ready_cached(figure_id):

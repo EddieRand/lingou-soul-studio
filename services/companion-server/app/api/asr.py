@@ -25,18 +25,32 @@ ASR WebSocket 端点（服务端编排版本）。
   - fire-and-forget：旧连接后台关闭，不阻塞新连接
 """
 
+from __future__ import annotations
+
 import asyncio
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import json
 import re
 import threading
 import time
 from collections import deque
 from typing import Optional
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+import uuid
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from fastapi.security.utils import get_authorization_scheme_param
 
+from app.api.auth import consume_ws_ticket, require_current_user
+from app.api.device_auth import (
+    VOICE_STREAM_SCOPE,
+    authenticate_device_credential,
+    device_principal_from_authorization,
+)
 from app.core.asr_adapter import is_asr_available, _build_full_client_request, _build_audio_frame, _parse_server_response
+from app.core.dialogue_state import reset
 from app.core.tts_adapter import stop_playback
 from app.core.dialogue_engine import process_text_input
+from data.store import figure_storage_key, get_base_for_owner
 
 router = APIRouter(prefix="/api/asr", tags=["asr"])
 
@@ -48,6 +62,118 @@ VOLC_OPEN_TIMEOUT = 4.0   # 火山连接超时（秒）
 VOLC_MAX_RETRIES = 2     # 最大重试次数
 VOLC_RETRY_DELAY = 0.3   # 重试之间退避（秒）
 VOLC_CLOSE_TIMEOUT = 2.0  # 旧连接关闭超时（秒）
+WS_PROTOCOL = "lingou.asr.v1"
+WS_TICKET_PROTOCOL_PREFIX = "lingou.ticket."
+DEVICE_WS_PROTOCOL = "lingou.device.voice.v1"
+DEVICE_AUDIO_FORMAT = "pcm"
+DEVICE_AUDIO_SAMPLE_RATE = 24000
+DEVICE_AUDIO_FRAME_BYTES = 4096
+SESSION_REPLACED_CLOSE_CODE = 4410
+DEVICE_AUTH_CLOSE_CODE = 4401
+DEVICE_NOT_READY_CLOSE_CODE = 4404
+
+
+class TurnCancellation:
+    """Cancellation token that can serialize final persistence with cancel."""
+
+    def __init__(self):
+        self._event = threading.Event()
+        self._lock = threading.RLock()
+        self._callbacks: set = set()
+
+    def is_set(self) -> bool:
+        return self._event.is_set()
+
+    def set(self) -> None:
+        with self._lock:
+            self._event.set()
+            callbacks = list(self._callbacks)
+            self._callbacks.clear()
+        for callback in callbacks:
+            try:
+                callback()
+            except Exception:
+                pass
+
+    def add_callback(self, callback) -> None:
+        with self._lock:
+            if self._event.is_set():
+                run_now = True
+            else:
+                self._callbacks.add(callback)
+                run_now = False
+        if run_now:
+            callback()
+
+    def remove_callback(self, callback) -> None:
+        with self._lock:
+            self._callbacks.discard(callback)
+
+    def run_if_active(self, callback) -> bool:
+        with self._lock:
+            if self._event.is_set():
+                return False
+            callback()
+            return True
+
+
+@dataclass
+class VoiceTurn:
+    turn_id: str
+    sequence: int
+    user_text: str
+    cancel_event: TurnCancellation = field(default_factory=TurnCancellation)
+    task: Optional[asyncio.Task] = None
+    cancel_reason: Optional[str] = None
+    timestamps: dict[str, float] = field(default_factory=dict)
+    audio_sequence: int = 0
+    audio_ids: set[str] = field(default_factory=set)
+    audio_terminal_ids: set[str] = field(default_factory=set)
+    audio_playback_stages: dict[str, str] = field(default_factory=dict)
+    audio_stream_complete: bool = False
+    audio_failed: bool = False
+    playback_done: asyncio.Event = field(default_factory=asyncio.Event)
+    started_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+
+    def mark(self, name: str) -> None:
+        self.timestamps.setdefault(name, time.monotonic())
+
+    def metrics(self) -> dict[str, float]:
+        origin = self.timestamps.get("speech_finalized", min(self.timestamps.values()))
+        return {
+            f"{name}_ms": round((value - origin) * 1000, 1)
+            for name, value in self.timestamps.items()
+        }
+
+
+class VoiceSessionRegistry:
+    """Single active voice connection per physical base, regardless of client."""
+
+    def __init__(self):
+        self._sessions: dict[str, VoiceCallSession] = {}
+        self._lock = threading.RLock()
+
+    def replace(self, session: "VoiceCallSession") -> Optional["VoiceCallSession"]:
+        with self._lock:
+            previous = self._sessions.get(session.base_id)
+            self._sessions[session.base_id] = session
+            return previous if previous is not session else None
+
+    def discard(self, session: "VoiceCallSession") -> bool:
+        with self._lock:
+            if self._sessions.get(session.base_id) is session:
+                self._sessions.pop(session.base_id, None)
+                return True
+            return False
+
+    def is_current(self, session: "VoiceCallSession") -> bool:
+        with self._lock:
+            return self._sessions.get(session.base_id) is session
+
+
+voice_session_registry = VoiceSessionRegistry()
 
 
 class VoiceCallSession:
@@ -61,14 +187,48 @@ class VoiceCallSession:
       - epoch 机制：旧连接自动退出，不阻塞新连接
     """
 
-    def __init__(self, websocket: WebSocket, base_id: str):
+    def __init__(
+        self,
+        websocket: WebSocket,
+        base_id: str,
+        owner_user_id: str,
+        *,
+        client_kind: str = "browser",
+        output_audio_format: str = "mp3",
+        output_sample_rate: int = 24000,
+        max_audio_frame_bytes: Optional[int] = None,
+    ):
+        if output_audio_format not in {"mp3", "pcm"}:
+            raise ValueError("output_audio_format must be mp3 or pcm")
+        if output_sample_rate not in {16000, 24000}:
+            raise ValueError("output_sample_rate must be 16000 or 24000")
+        if max_audio_frame_bytes is not None and max_audio_frame_bytes <= 0:
+            raise ValueError("max_audio_frame_bytes must be positive")
         self.ws = websocket
         self.base_id = base_id
+        self.owner_user_id = owner_user_id
+        self.client_kind = client_kind
+        self.output_audio_format = output_audio_format
+        self.output_sample_rate = output_sample_rate
+        self.max_audio_frame_bytes = max_audio_frame_bytes
+        self.session_id = str(uuid.uuid4())
+        self._closed = False
+        self._send_lock = asyncio.Lock()
+        self._turn_lock = asyncio.Lock()
+        self._turn_sequence = 0
+        self._active_turn: Optional[VoiceTurn] = None
+        self._background_tasks: set[asyncio.Task] = set()
+        base = get_base_for_owner(base_id, owner_user_id)
+        active_figure_id = base.get("active_figure_id") if base else None
+        self._playback_scope = (
+            figure_storage_key(owner_user_id, str(active_figure_id))
+            if active_figure_id
+            else None
+        )
         self.volc_ws = None  # 火山 ASR WebSocket
         self._connected = False  # 火山是否已连接并就绪
         self._replying = False  # 是否正在等待/播放灵偶回复
-        self._reply_lock = asyncio.Lock()
-        self._request_id = str(id(self))  # 用于日志标识
+        self._request_id = self.session_id[:8]  # 用于日志标识
 
         # ========== 连接代号（epoch）机制 ==========
         self._conn_epoch = 0  # 当前连接代号，每次新建连接 +1
@@ -86,9 +246,134 @@ class VoiceCallSession:
 
         # ========== 重连锁 ==========
         self._reconnecting = False  # 防止并发重连
+        self._barge_in_pending = False
 
-        # ========== Barge-in 取消事件 ==========
-        self._cancel_event: Optional[threading.Event] = None
+        self._last_finalized_text = ""
+        self._last_finalize_at = 0.0
+
+    def _spawn_task(self, coroutine, *, name: str) -> asyncio.Task:
+        task = asyncio.create_task(coroutine, name=name)
+        self._background_tasks.add(task)
+
+        def discard(completed: asyncio.Task) -> None:
+            self._background_tasks.discard(completed)
+            if not completed.cancelled():
+                try:
+                    completed.exception()
+                except Exception:
+                    pass
+
+        task.add_done_callback(discard)
+        return task
+
+    def _turn_is_current(self, turn: VoiceTurn) -> bool:
+        return (
+            not self._closed
+            and voice_session_registry.is_current(self)
+            and self._active_turn is turn
+            and not turn.cancel_event.is_set()
+        )
+
+    async def _emit_turn_metrics(
+        self,
+        turn: VoiceTurn,
+        status: str,
+        *,
+        require_current: bool,
+    ) -> None:
+        payload = {
+            "type": "turn_metrics",
+            "turn_id": turn.turn_id,
+            "turn_sequence": turn.sequence,
+            "status": status,
+            "started_at": turn.started_at,
+            "timings": turn.metrics(),
+        }
+        print(
+            "[VoiceTurnMetrics] "
+            + json.dumps(
+                {
+                    **payload,
+                    "session_id": self.session_id,
+                    "base_id": self.base_id,
+                    "owner_user_id": self.owner_user_id,
+                    "client_kind": self.client_kind,
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
+        await self._send_ws(
+            payload,
+            turn=turn if require_current else None,
+        )
+
+    async def _cancel_active_turn(
+        self,
+        reason: str,
+        *,
+        notify: bool = True,
+    ) -> Optional[VoiceTurn]:
+        task_to_wait: Optional[asyncio.Task] = None
+        async with self._turn_lock:
+            turn = self._active_turn
+            if turn is None:
+                return None
+            self._active_turn = None
+            self._replying = False
+            turn.cancel_reason = reason
+            turn.cancel_event.set()
+            turn.mark("cancelled")
+            task = turn.task
+            if task and task is not asyncio.current_task() and not task.done():
+                task.cancel()
+                task_to_wait = task
+
+        if task_to_wait:
+            await asyncio.gather(task_to_wait, return_exceptions=True)
+
+        if self._playback_scope:
+            try:
+                stop_playback(self._playback_scope)
+            except Exception:
+                pass
+        if notify and not self._closed:
+            await self._send_ws(
+                {
+                    "type": "stop_audio",
+                    "turn_id": turn.turn_id,
+                    "reason": reason,
+                }
+            )
+            await self._send_ws(
+                {
+                    "type": "turn_cancelled",
+                    "turn_id": turn.turn_id,
+                    "reason": reason,
+                }
+            )
+        await self._emit_turn_metrics(
+            turn,
+            "cancelled",
+            require_current=False,
+        )
+        return turn
+
+    async def _begin_turn(self, user_text: str) -> VoiceTurn:
+        if self._closed or not voice_session_registry.is_current(self):
+            raise asyncio.CancelledError
+        await self._cancel_active_turn("superseded")
+        async with self._turn_lock:
+            self._turn_sequence += 1
+            turn = VoiceTurn(
+                turn_id=str(uuid.uuid4()),
+                sequence=self._turn_sequence,
+                user_text=user_text,
+            )
+            turn.mark("speech_finalized")
+            self._active_turn = turn
+            self._replying = True
+            return turn
 
     # ============== epoch 机制 ==============
 
@@ -135,6 +420,8 @@ class VoiceCallSession:
         发送音频到火山 ASR（全双工：Barge-in 期间也正常转发）。
         因为 AEC 已把灵偶声音消掉，转发不会导致自问自答。
         """
+        if self._closed:
+            return
         if self._connected and self.volc_ws:
             try:
                 frame = _build_audio_frame(audio_chunk)
@@ -161,7 +448,10 @@ class VoiceCallSession:
     def _fire_and_forget_close(self, ws, epoch: int):
         """Fire-and-forget：后台关闭旧连接，不阻塞"""
         if ws:
-            asyncio.create_task(self._safe_close_volc_ws(ws, epoch))
+            self._spawn_task(
+                self._safe_close_volc_ws(ws, epoch),
+                name=f"voice-volc-close-{self.session_id}-{epoch}",
+            )
 
     # ============== 火山连接（带重试） ==============
 
@@ -177,6 +467,8 @@ class VoiceCallSession:
         from app.core.asr_adapter import _get_asr_config, VOLC_ASR_URL
         import websockets
 
+        if self._closed:
+            return False
         cfg = _get_asr_config()
         headers = {
             "X-Api-Key": cfg["api_key"],
@@ -185,6 +477,8 @@ class VoiceCallSession:
         }
 
         for attempt in range(max_retries + 1):
+            if self._closed:
+                return False
             try:
                 print(f"[VoiceCall {self._request_id}] 连接火山 ASR (尝试 {attempt + 1}/{max_retries + 1})...")
 
@@ -226,7 +520,10 @@ class VoiceCallSession:
 
                 # 启动新接收循环（带 epoch）
                 my_epoch = await self._get_epoch()
-                asyncio.create_task(self.recv_loop(my_epoch))
+                self._spawn_task(
+                    self.recv_loop(my_epoch),
+                    name=f"voice-asr-recv-{self.session_id}-{my_epoch}",
+                )
 
                 return True
 
@@ -256,14 +553,16 @@ class VoiceCallSession:
 
     async def _start_volc_connection_background(self):
         """后台异步连接火山 ASR"""
-        if self._connecting:
+        if self._closed or self._connecting:
             return
         self._connecting = True
 
         try:
             # 首次连接需要重置基线
             success = await self.connect_volc_with_retry(max_retries=VOLC_MAX_RETRIES, reset_baseline=True)
-            if not success:
+            if success:
+                await self._send_ws({"type": "status", "status": "ready"})
+            else:
                 print(f"[VoiceCall {self._request_id}] 后台连接火山失败，音频将继续缓冲")
         finally:
             self._connecting = False
@@ -275,7 +574,7 @@ class VoiceCallSession:
         回复结束后主动重连火山，迎接下一轮。
         使用 epoch 机制：旧连接自动退出，不阻塞新连接。
         """
-        if self._reconnecting:
+        if self._closed or self._reconnecting:
             print(f"[VoiceCall {self._request_id}] 已有重连在进行，跳过")
             return
         self._reconnecting = True
@@ -314,6 +613,8 @@ class VoiceCallSession:
 
     async def _self_heal_connection(self, error_epoch: int):
         """自愈重连：火山 error 帧时尝试重建连接一次"""
+        if self._closed:
+            return
         # 检查 epoch：旧 epoch 的 error 直接忽略
         current_epoch = await self._get_epoch()
         if error_epoch < current_epoch:
@@ -357,6 +658,8 @@ class VoiceCallSession:
 
     async def _on_result_text_changed(self, text: str, my_epoch: int):
         """result.text 发生变化时的处理"""
+        if self._closed or not voice_session_registry.is_current(self):
+            return
         # 检查 epoch：旧连接的文本忽略
         current_epoch = await self._get_epoch()
         if my_epoch < current_epoch:
@@ -371,15 +674,21 @@ class VoiceCallSession:
         await self._reset_stability_timer()
 
         # 打断检测：回复中检测到新内容
-        if self._replying:
+        if self._replying and not self._barge_in_pending:
             if self._is_echo_of_last_final(text):
                 # 只是刚说那句的尾巴/重复，不算打断
                 return
             print(f"[VoiceCall {self._request_id}] 打断检测（新内容）: '{text}'")
-            asyncio.create_task(self._handle_barge_in(text))
+            self._barge_in_pending = True
+            self._spawn_task(
+                self._handle_barge_in(text),
+                name=f"voice-barge-in-{self.session_id}",
+            )
 
     async def _reset_stability_timer(self):
         """重置稳定定时器"""
+        if self._closed:
+            return
         if self._stability_timer and not self._stability_timer.done():
             self._stability_timer.cancel()
             try:
@@ -387,13 +696,18 @@ class VoiceCallSession:
             except asyncio.CancelledError:
                 pass
 
-        self._stability_timer = asyncio.create_task(self._stability_timeout())
+        self._stability_timer = asyncio.create_task(
+            self._stability_timeout(),
+            name=f"voice-stability-{self.session_id}",
+        )
 
     async def _stability_timeout(self):
         """稳定超时回调：1.5s 内 result.text 无变化，判定说完"""
         try:
             await asyncio.sleep(STABILITY_TIMEOUT)
         except asyncio.CancelledError:
+            return
+        if self._closed or not voice_session_registry.is_current(self):
             return
 
         async with self._current_text_lock:
@@ -402,7 +716,10 @@ class VoiceCallSession:
 
         if text.strip():
             print(f"[VoiceCall {self._request_id}] 稳定超时触发: '{text}'")
-            asyncio.create_task(self._finalize_text(text))
+            self._spawn_task(
+                self._finalize_text(text),
+                name=f"voice-finalize-{self.session_id}",
+            )
 
     async def _cancel_timer(self):
         """取消稳定定时器"""
@@ -418,6 +735,8 @@ class VoiceCallSession:
 
     async def _finalize_text(self, text: str):
         """finalize 整段文本（触发一轮对话）"""
+        if self._closed or not voice_session_registry.is_current(self):
+            return
         text = text.strip()
         if not text:
             return
@@ -430,12 +749,24 @@ class VoiceCallSession:
         print(f"[VoiceCall {self._request_id}] finalize: '{text}'")
         self._last_finalized_text = text
         self._last_finalize_at = time.monotonic()
+        turn = await self._begin_turn(text)
 
         # 推送 final
-        await self._send_ws({"type": "final", "text": text})
+        await self._send_ws(
+            {
+                "type": "final",
+                "turn_id": turn.turn_id,
+                "turn_sequence": turn.sequence,
+                "text": text,
+            },
+            turn=turn,
+        )
 
         # 触发对话（后台异步）
-        asyncio.create_task(self._get_figure_reply(text))
+        turn.task = self._spawn_task(
+            self._get_figure_reply(turn),
+            name=f"voice-reply-{self.session_id}-{turn.sequence}",
+        )
 
         # 重置本地状态（不重连火山，等回复结束后再重连）
         await self._cancel_timer()
@@ -452,7 +783,7 @@ class VoiceCallSession:
         print(f"[VoiceCall {self._request_id}] recv_loop 启动，epoch={my_epoch}")
 
         try:
-            while self._connected:
+            while self._connected and not self._closed:
                 # 【关键】检查 epoch：旧连接自动退出
                 current_epoch = await self._get_epoch()
                 if my_epoch < current_epoch:
@@ -479,7 +810,10 @@ class VoiceCallSession:
                 if result.get("error"):
                     print(f"[VoiceCall {self._request_id}] 火山 error: {result['error']}")
                     # 自愈重连（检查 epoch）
-                    asyncio.create_task(self._self_heal_connection(my_epoch))
+                    self._spawn_task(
+                        self._self_heal_connection(my_epoch),
+                        name=f"voice-self-heal-{self.session_id}-{my_epoch}",
+                    )
                     return
 
                 text = result.get("text", "") or ""
@@ -504,70 +838,313 @@ class VoiceCallSession:
 
     # ============== 处理对话 ==============
 
-    async def _get_figure_reply(self, user_text: str):
+    async def _send_turn_audio(self, turn: VoiceTurn, payload: bytes) -> bool:
+        if not payload or not self._turn_is_current(turn):
+            return False
+        async with self._send_lock:
+            if not self._turn_is_current(turn):
+                return False
+            turn.audio_sequence += 1
+            audio_id = f"{turn.turn_id}:{turn.audio_sequence}"
+            turn.audio_ids.add(audio_id)
+            envelope = {
+                "type": "audio_output",
+                "stage": "synthesized",
+                "audio_id": audio_id,
+                "content_type": (
+                    "audio/mpeg"
+                    if self.output_audio_format == "mp3"
+                    else (
+                        "audio/pcm;rate="
+                        f"{self.output_sample_rate};channels=1;format=s16le"
+                    )
+                ),
+                "audio_format": self.output_audio_format,
+                "sample_rate": self.output_sample_rate,
+                "channels": 1,
+                "sample_format": (
+                    "encoded" if self.output_audio_format == "mp3" else "s16le"
+                ),
+                "byte_length": len(payload),
+                "session_id": self.session_id,
+                "turn_id": turn.turn_id,
+                "turn_sequence": turn.sequence,
+            }
+            try:
+                turn.mark("first_audio_synthesized")
+                await self.ws.send_json(envelope)
+                if self.max_audio_frame_bytes:
+                    chunks = [
+                        payload[offset:offset + self.max_audio_frame_bytes]
+                        for offset in range(0, len(payload), self.max_audio_frame_bytes)
+                    ]
+                    for index, chunk in enumerate(chunks):
+                        if not self._turn_is_current(turn):
+                            return False
+                        await self.ws.send_json({
+                            **envelope,
+                            "type": "audio_chunk",
+                            "stage": "transferring",
+                            "chunk_index": index,
+                            "chunk_count": len(chunks),
+                            "chunk_byte_length": len(chunk),
+                        })
+                        await self.ws.send_bytes(chunk)
+                else:
+                    await self.ws.send_bytes(payload)
+                turn.mark("first_audio")
+                turn.mark("first_audio_transferred")
+                await self.ws.send_json({
+                    **envelope,
+                    "stage": "transferred",
+                })
+                return True
+            except Exception:
+                turn.audio_failed = True
+                return False
+
+    async def handle_client_message(self, payload: dict) -> None:
+        """Accept playback receipts and explicit device interruption."""
+        if payload.get("type") == "cancel_turn":
+            requested_session_id = payload.get("session_id")
+            if requested_session_id and requested_session_id != self.session_id:
+                return
+            interrupted = await self._cancel_active_turn("client_cancel")
+            await self._send_ws({
+                "type": "cancel_ack",
+                "interrupted_turn_id": interrupted.turn_id if interrupted else None,
+            })
+            return
+        if payload.get("type") != "audio_playback":
+            return
+        turn = self._active_turn
+        if (
+            turn is None
+            or payload.get("session_id") != self.session_id
+            or payload.get("turn_id") != turn.turn_id
+        ):
+            return
+        audio_id = str(payload.get("audio_id") or "")
+        if audio_id not in turn.audio_ids:
+            return
+
+        stage = payload.get("stage")
+        marks = {
+            "decoded": "first_audio_decoded",
+            "playback_started": "playback_started",
+            "playback_completed": "playback_completed",
+            "playback_failed": "playback_failed",
+        }
+        mark = marks.get(str(stage))
+        if mark is None:
+            return
+        current_stage = turn.audio_playback_stages.get(audio_id)
+        if current_stage is None:
+            if stage != "decoded":
+                return
+        elif current_stage == "decoded":
+            if stage == "decoded":
+                return
+            if stage != "playback_started":
+                return
+        elif current_stage == "playback_started":
+            if stage == "playback_started":
+                return
+            if stage not in {"playback_completed", "playback_failed"}:
+                return
+        else:
+            return
+        turn.audio_playback_stages[audio_id] = str(stage)
+        turn.mark(mark)
+        if stage in {"playback_completed", "playback_failed"}:
+            turn.audio_terminal_ids.add(audio_id)
+            if stage == "playback_failed":
+                turn.audio_failed = True
+            if (
+                turn.audio_stream_complete
+                and turn.audio_terminal_ids.issuperset(turn.audio_ids)
+            ):
+                turn.playback_done.set()
+
+    async def _send_turn_text(self, turn: VoiceTurn, text: str) -> bool:
+        if not text or not self._turn_is_current(turn):
+            return False
+        sent = await self._send_ws(
+            {"type": "reply_chunk", "text": text},
+            turn=turn,
+        )
+        if sent:
+            turn.mark("first_text")
+        return sent
+
+    async def _get_figure_reply(self, turn: VoiceTurn):
         """获取灵偶回复并播放（后台运行）"""
-        async with self._reply_lock:
-            self._replying = True
-
-        # 【Barge-in】创建新的取消事件
-        self._cancel_event = threading.Event()
-
         try:
+            if not self._turn_is_current(turn):
+                return
+            turn.mark("reply_started")
             # 立即通知前端开始说话
-            await self._send_ws({"type": "speaking", "status": "start"})
+            await self._send_ws(
+                {"type": "speaking", "status": "start"},
+                turn=turn,
+            )
 
             # 【关键】回复一开始就重连火山，换一条干净连接：
             #  ① 上一句的尾巴落在已失效的旧连接上被忽略（彻底解决重复 finalize）
             #  ② 回复期间是干净基线，用户说新话就是新话，不带上一句前缀 → 打断能正常触发
             await self._reconnect_for_next_turn()
+            if not self._turn_is_current(turn):
+                return
 
             # 获取事件循环，用于 audio_sink
             loop = asyncio.get_running_loop()
-            
-            # 构造 audio_sink：将音频字节通过 WebSocket 回传前端
-            audio_sink = lambda b: asyncio.run_coroutine_threadsafe(self.ws.send_bytes(b), loop)
 
-            # 构造 text_sink：将每句文字通过 WebSocket 回传前端
-            text_sink = lambda s: asyncio.run_coroutine_threadsafe(
-                self._send_ws({"type": "reply_chunk", "text": s}), loop
-            )
+            def audio_sink(payload: bytes):
+                if turn.cancel_event.is_set():
+                    return False
+                future = asyncio.run_coroutine_threadsafe(
+                    self._send_turn_audio(turn, payload),
+                    loop,
+                )
+                try:
+                    return future.result(timeout=5)
+                except Exception:
+                    return False
+
+            def text_sink(text: str):
+                if turn.cancel_event.is_set():
+                    return None
+                future = asyncio.run_coroutine_threadsafe(
+                    self._send_turn_text(turn, text),
+                    loop,
+                )
+                try:
+                    return future.result(timeout=5)
+                except Exception:
+                    return False
 
             # 【关键修复】把阻塞的对话处理放到线程池，不阻塞事件循环
             result = await asyncio.to_thread(
                 process_text_input,
                 self.base_id,
-                user_text,
+                turn.user_text,
                 brain_mode_override="online",
                 audio_sink=audio_sink,
                 text_sink=text_sink,
-                cancel_event=self._cancel_event,
+                cancel_event=turn.cancel_event,
+                audio_format=self.output_audio_format,
+                audio_sample_rate=self.output_sample_rate,
+                owner_user_id=self.owner_user_id,
+                session_id=self.session_id,
+                turn_id=turn.turn_id,
             )
+            if not self._turn_is_current(turn) or result.get("cancelled"):
+                return
             reply = result.get("reply", "")
             brain_mode = result.get("brain_mode", "")
             tts_engine = result.get("tts_engine", "")
+            turn.mark("reply_completed")
+            turn.audio_stream_complete = True
 
-            await self._send_ws({
-                "type": "reply",
-                "reply": reply,
-                "brain_mode": brain_mode,
-                "tts_engine": tts_engine,
-            })
+            await self._send_ws(
+                {
+                    "type": "reply",
+                    "reply": reply,
+                    "brain_mode": brain_mode,
+                    "tts_engine": tts_engine,
+                    "audio_status": (
+                        "awaiting_playback" if turn.audio_ids else "failed"
+                    ),
+                },
+                turn=turn,
+            )
+
+            if turn.audio_ids:
+                if turn.audio_terminal_ids.issuperset(turn.audio_ids):
+                    turn.playback_done.set()
+                await self._send_ws(
+                    {
+                        "type": "audio_output",
+                        "stage": "stream_complete",
+                        "chunk_count": len(turn.audio_ids),
+                    },
+                    turn=turn,
+                )
+                try:
+                    await asyncio.wait_for(turn.playback_done.wait(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    turn.audio_failed = True
+                    turn.mark("playback_timeout")
+                    await self._send_ws(
+                        {
+                            "type": "audio_output",
+                            "stage": "failed",
+                            "error_code": "PLAYBACK_CONFIRMATION_TIMEOUT",
+                            "message": "未收到终端播放完成确认",
+                        },
+                        turn=turn,
+                    )
+            else:
+                turn.audio_failed = True
+                turn.mark("audio_unavailable")
+                await self._send_ws(
+                    {
+                        "type": "audio_output",
+                        "stage": "failed",
+                        "error_code": "NO_AUDIO_GENERATED",
+                        "message": "回复文字已生成，但没有可播放音频",
+                    },
+                    turn=turn,
+                )
 
             print(f"[VoiceCall {self._request_id}] 灵偶回复完成: '{reply[:30]}...'")
 
+        except asyncio.CancelledError:
+            return
         except Exception as e:
             print(f"[VoiceCall {self._request_id}] 获取灵偶回复失败: {e}")
-            await self._send_ws({"type": "error", "message": f"获取回复失败: {e}"})
-            await self._send_ws({"type": "reply", "reply": "", "brain_mode": "offline", "tts_engine": ""})
+            if self._turn_is_current(turn):
+                turn.mark("failed")
+                await self._send_ws(
+                    {"type": "error", "message": f"获取回复失败: {e}"},
+                    turn=turn,
+                )
+                await self._send_ws(
+                    {
+                        "type": "reply",
+                        "reply": "",
+                        "brain_mode": "offline",
+                        "tts_engine": "",
+                    },
+                    turn=turn,
+                )
         finally:
-            await self._send_ws({"type": "speaking", "status": "end"})
-            async with self._reply_lock:
-                self._replying = False
-
-            # 重置本地状态
-            await self._cancel_timer()
-            async with self._current_text_lock:
-                self._current_text = ""
+            if self._turn_is_current(turn):
+                await self._send_ws(
+                    {"type": "speaking", "status": "end"},
+                    turn=turn,
+                )
+                await self._emit_turn_metrics(
+                    turn,
+                    (
+                        "completed"
+                        if (
+                            "reply_completed" in turn.timestamps
+                            and not turn.audio_failed
+                        )
+                        else "audio_failed"
+                        if "reply_completed" in turn.timestamps
+                        else "failed"
+                    ),
+                    require_current=True,
+                )
+                async with self._turn_lock:
+                    if self._active_turn is turn:
+                        self._active_turn = None
+                        self._replying = False
+                await self._cancel_timer()
+                async with self._current_text_lock:
+                    self._current_text = ""
 
     # ============== 打断 ==============
 
@@ -586,72 +1163,149 @@ class VoiceCallSession:
 
     async def _handle_barge_in(self, user_text: str):
         """打断：灵偶播放期间用户开口"""
-        if not user_text.strip():
-            return
-
-        print(f"[VoiceCall {self._request_id}] 打断: '{user_text}'")
-
-        # 【Barge-in】触发取消信号
-        if self._cancel_event:
-            self._cancel_event.set()
-            print(f"[VoiceCall {self._request_id}] 已触发取消事件")
-
-        # 通知前端立即停止播放音频
-        await self._send_ws({"type": "stop_audio"})
-        print(f"[VoiceCall {self._request_id}] 已发送 stop_audio 到前端")
-
         try:
-            stop_playback()
-            print(f"[VoiceCall {self._request_id}] 已停止当前播放")
-        except Exception as e:
-            print(f"[VoiceCall {self._request_id}] 停止播放失败: {e}")
-
-        async with self._reply_lock:
-            self._replying = False
-
-        await self._cancel_timer()
-
-        async with self._current_text_lock:
-            self._current_text = ""
-
-        await self._send_ws({"type": "barge_in", "text": user_text})
-
-        # 打断后直接 finalize 这句话
-        asyncio.create_task(self._finalize_text(user_text))
+            if not user_text.strip() or self._closed:
+                return
+            print(f"[VoiceCall {self._request_id}] 打断: '{user_text}'")
+            interrupted = await self._cancel_active_turn("barge_in")
+            await self._cancel_timer()
+            async with self._current_text_lock:
+                self._current_text = ""
+            await self._send_ws(
+                {
+                    "type": "barge_in",
+                    "text": user_text,
+                    "interrupted_turn_id": (
+                        interrupted.turn_id if interrupted else None
+                    ),
+                }
+            )
+            await self._finalize_text(user_text)
+        finally:
+            self._barge_in_pending = False
 
     # ============== WebSocket 发送 ==============
 
-    async def _send_ws(self, data: dict):
+    async def _send_ws(
+        self,
+        data: dict,
+        *,
+        turn: Optional[VoiceTurn] = None,
+    ) -> bool:
         """发送消息给前端 WebSocket（静默处理断开）"""
-        try:
-            await self.ws.send_json(data)
-        except Exception:
-            pass
+        if self._closed or (turn is not None and not self._turn_is_current(turn)):
+            return False
+        payload = dict(data)
+        payload.setdefault("session_id", self.session_id)
+        if turn is not None:
+            payload.setdefault("turn_id", turn.turn_id)
+            payload.setdefault("turn_sequence", turn.sequence)
+        async with self._send_lock:
+            if self._closed or (
+                turn is not None and not self._turn_is_current(turn)
+            ):
+                return False
+            try:
+                await self.ws.send_json(payload)
+                return True
+            except Exception:
+                return False
 
     # ============== 关闭 ==============
 
     async def close_volc(self):
-        """关闭火山 ASR 连接"""
+        """Cancel all session work and close the provider connection."""
+        if self._closed:
+            return
+        self._closed = True
         self._connected = False
-        self._replying = False
+        await self._cancel_active_turn("session_closed", notify=False)
 
         # epoch+1，让所有旧循环退出
         await self._next_epoch()
 
-        if self.volc_ws:
-            self._fire_and_forget_close(self.volc_ws, await self._get_epoch())
-            self.volc_ws = None
+        provider_ws = self.volc_ws
+        self.volc_ws = None
+        if provider_ws:
+            await self._safe_close_volc_ws(provider_ws, await self._get_epoch())
 
         await self._cancel_timer()
+        current_task = asyncio.current_task()
+        tasks = [
+            task for task in self._background_tasks
+            if task is not current_task and not task.done()
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        async with self._buffer_lock:
+            self._audio_buffer.clear()
+
+    async def supersede(self, replacement_session_id: str) -> None:
+        """Notify and close this connection when a newer base session wins."""
+        if self._closed:
+            return
+        await self._send_ws(
+            {
+                "type": "session_replaced",
+                "replacement_session_id": replacement_session_id,
+            }
+        )
+        await self.close_volc()
+        try:
+            await self.ws.close(
+                code=SESSION_REPLACED_CLOSE_CODE,
+                reason="newer voice session connected",
+            )
+        except Exception:
+            pass
 
 
 # ============== WebSocket 端点 ==============
 
-@router.websocket("/stream")
-async def asr_stream_ws(websocket: WebSocket, base_id: str = "BASE-001"):
-    """语音通话 WebSocket"""
-    await websocket.accept()
+def _ticket_from_subprotocol_header(websocket: WebSocket) -> Optional[str]:
+    """Read the one-use ticket without putting credentials in the URL."""
+    raw_protocols = websocket.headers.get("sec-websocket-protocol", "")
+    protocols = [value.strip() for value in raw_protocols.split(",") if value.strip()]
+    if WS_PROTOCOL not in protocols:
+        return None
+    for protocol in protocols:
+        if protocol.startswith(WS_TICKET_PROTOCOL_PREFIX):
+            return protocol.removeprefix(WS_TICKET_PROTOCOL_PREFIX)
+    return None
 
+def _offered_protocols(websocket: WebSocket) -> set[str]:
+    return {
+        value.strip()
+        for value in websocket.headers.get("sec-websocket-protocol", "").split(",")
+        if value.strip()
+    }
+
+
+async def _reject_voice_socket(
+    websocket: WebSocket,
+    *,
+    protocol: str,
+    code: int,
+    reason: str,
+) -> None:
+    selected_protocol = protocol if protocol in _offered_protocols(websocket) else None
+    await websocket.accept(subprotocol=selected_protocol)
+    await websocket.close(code=code, reason=reason)
+
+
+async def _serve_voice_socket(
+    websocket: WebSocket,
+    *,
+    base_id: str,
+    owner_user_id: str,
+    client_kind: str,
+    output_audio_format: str = "mp3",
+    output_sample_rate: int = 24000,
+    max_audio_frame_bytes: Optional[int] = None,
+    device_credential: Optional[str] = None,
+) -> None:
     ws_closed = False
 
     if not is_asr_available():
@@ -662,22 +1316,77 @@ async def asr_stream_ws(websocket: WebSocket, base_id: str = "BASE-001"):
         await websocket.close()
         return
 
-    session = VoiceCallSession(websocket, base_id)
+    session = VoiceCallSession(
+        websocket,
+        base_id,
+        owner_user_id,
+        client_kind=client_kind,
+        output_audio_format=output_audio_format,
+        output_sample_rate=output_sample_rate,
+        max_audio_frame_bytes=max_audio_frame_bytes,
+    )
+    previous = voice_session_registry.replace(session)
+    if previous:
+        await previous.supersede(session.session_id)
 
     # 立即推送聆听状态
-    await session._send_ws({"type": "status", "status": "listening"})
-    print(f"[VoiceCall {session._request_id}] 前端已连接，立即进入聆听中...")
+    await session._send_ws({
+        "type": "status",
+        "status": "listening",
+        "connection_policy": "newest_connection_wins",
+        "client_kind": client_kind,
+        "audio_format": output_audio_format,
+        "audio_sample_rate": output_sample_rate,
+    })
+    print(
+        f"[VoiceCall {session._request_id}] {client_kind} 已连接，立即进入聆听中..."
+    )
 
     # 火山连接后台建立
-    asyncio.create_task(session._start_volc_connection_background())
+    session._spawn_task(
+        session._start_volc_connection_background(),
+        name=f"voice-asr-connect-{session.session_id}",
+    )
 
     try:
         while True:
-            data = await websocket.receive_bytes()
-            await session.send_audio(data)
+            message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                raise WebSocketDisconnect(message.get("code", 1000))
+            if device_credential is not None:
+                current_principal = authenticate_device_credential(
+                    device_credential,
+                    required_scope=VOICE_STREAM_SCOPE,
+                )
+                if (
+                    current_principal is None
+                    or str(current_principal.get("base_id")) != base_id
+                    or str(current_principal.get("owner_user_id"))
+                    != owner_user_id
+                ):
+                    ws_closed = True
+                    await session.close_volc()
+                    await websocket.close(
+                        code=DEVICE_AUTH_CLOSE_CODE,
+                        reason="device credential is no longer authorized",
+                    )
+                    return
+            audio_data = message.get("bytes")
+            if audio_data is not None:
+                await session.send_audio(audio_data)
+                continue
+            text_data = message.get("text")
+            if text_data is None:
+                continue
+            try:
+                payload = json.loads(text_data)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(payload, dict):
+                await session.handle_client_message(payload)
 
     except WebSocketDisconnect:
-        print(f"[VoiceCall {session._request_id}] 前端断开连接")
+        print(f"[VoiceCall {session._request_id}] {client_kind} 断开连接")
     except Exception as e:
         print(f"[VoiceCall {session._request_id}] WebSocket 异常: {e}")
         if not ws_closed:
@@ -688,6 +1397,8 @@ async def asr_stream_ws(websocket: WebSocket, base_id: str = "BASE-001"):
                 pass
     finally:
         await session.close_volc()
+        if voice_session_registry.discard(session):
+            reset(base_id)
 
         if not ws_closed:
             ws_closed = True
@@ -697,10 +1408,79 @@ async def asr_stream_ws(websocket: WebSocket, base_id: str = "BASE-001"):
                 pass
 
 
+@router.websocket("/stream")
+async def asr_stream_ws(websocket: WebSocket, base_id: str):
+    """Authenticated H5 voice-call WebSocket."""
+    ticket = _ticket_from_subprotocol_header(websocket)
+    current_user, close_code = consume_ws_ticket(ticket or "", base_id)
+    if close_code:
+        # Complete the handshake before closing so clients receive the 440x
+        # application code. Authentication still precedes provider work.
+        await _reject_voice_socket(
+            websocket,
+            protocol=WS_PROTOCOL,
+            code=close_code,
+            reason="authentication rejected",
+        )
+        return
+
+    await websocket.accept(subprotocol=WS_PROTOCOL)
+    await _serve_voice_socket(
+        websocket,
+        base_id=base_id,
+        owner_user_id=str(current_user["user_id"]),
+        client_kind="browser",
+    )
+
+
+@router.websocket("/device-stream")
+async def asr_device_stream_ws(websocket: WebSocket):
+    """Provisioned DNESP32S3 voice connection using its device credential."""
+    authorization = websocket.headers.get("authorization")
+    principal = device_principal_from_authorization(
+        authorization,
+        required_scope=VOICE_STREAM_SCOPE,
+    )
+    if principal is None or DEVICE_WS_PROTOCOL not in _offered_protocols(websocket):
+        await _reject_voice_socket(
+            websocket,
+            protocol=DEVICE_WS_PROTOCOL,
+            code=DEVICE_AUTH_CLOSE_CODE,
+            reason="device authentication rejected",
+        )
+        return
+
+    base_id = str(principal["base_id"])
+    owner_user_id = str(principal["owner_user_id"])
+    _scheme, device_credential = get_authorization_scheme_param(authorization)
+    base = get_base_for_owner(base_id, owner_user_id)
+    if not base or not base.get("active_figure_id"):
+        await _reject_voice_socket(
+            websocket,
+            protocol=DEVICE_WS_PROTOCOL,
+            code=DEVICE_NOT_READY_CLOSE_CODE,
+            reason="base has no active figure",
+        )
+        return
+
+    await websocket.accept(subprotocol=DEVICE_WS_PROTOCOL)
+    await _serve_voice_socket(
+        websocket,
+        base_id=base_id,
+        owner_user_id=owner_user_id,
+        client_kind="device",
+        output_audio_format=DEVICE_AUDIO_FORMAT,
+        output_sample_rate=DEVICE_AUDIO_SAMPLE_RATE,
+        max_audio_frame_bytes=DEVICE_AUDIO_FRAME_BYTES,
+        device_credential=device_credential,
+    )
+
+
 @router.get("/status")
-def asr_status():
+def asr_status(_current_user: dict = Depends(require_current_user)):
     """检查 ASR 服务状态"""
+    available = is_asr_available()
     return {
-        "available": is_asr_available(),
-        "message": "语音服务已配置" if is_asr_available() else "语音服务未配置",
+        "available": available,
+        "message": "语音服务已配置" if available else "语音服务未配置",
     }

@@ -37,7 +37,13 @@ def is_v2_configured() -> bool:
     return bool(cfg["api_key"])
 
 
-async def _synthesize_v2_async(text: str, speaker: str) -> Optional[bytes]:
+async def _synthesize_v2_async(
+    text: str,
+    speaker: str,
+    *,
+    audio_format: str = "mp3",
+    sample_rate: int = 24000,
+) -> Optional[bytes]:
     """
     Async implementation of TTS v2 bidirectional streaming.
     
@@ -46,7 +52,7 @@ async def _synthesize_v2_async(text: str, speaker: str) -> Optional[bytes]:
         2. start_session → wait_for_event(SessionStarted)
         3. task_request → finish_session
         4. loop receive_message: collect AudioOnlyServer frames
-        5. on SessionFinished → finish_connection → return mp3 bytes
+        5. on SessionFinished → finish_connection → return requested audio bytes
     """
     cfg = _volc_v2_config()
     if not cfg["api_key"]:
@@ -78,8 +84,8 @@ async def _synthesize_v2_async(text: str, speaker: str) -> Optional[bytes]:
                 "req_params": {
                     "speaker": speaker,
                     "audio_params": {
-                        "format": "mp3",
-                        "sample_rate": 24000,
+                        "format": audio_format,
+                        "sample_rate": sample_rate,
                     },
                 },
             }).encode()
@@ -131,17 +137,30 @@ async def _synthesize_v2_async(text: str, speaker: str) -> Optional[bytes]:
     return b"".join(audio_chunks)
 
 
-def synthesize_v2(text: str, speaker: str) -> Optional[bytes]:
+def synthesize_v2(
+    text: str,
+    speaker: str,
+    *,
+    audio_format: str = "mp3",
+    sample_rate: int = 24000,
+) -> Optional[bytes]:
     """
     Synchronous wrapper for TTS v2.
     
-    Returns MP3 bytes or None on failure.
+    Returns requested audio bytes or None on failure.
     """
     if not text or not speaker:
         return None
 
     try:
-        return asyncio.run(_synthesize_v2_async(text, speaker))
+        return asyncio.run(
+            _synthesize_v2_async(
+                text,
+                speaker,
+                audio_format=audio_format,
+                sample_rate=sample_rate,
+            )
+        )
     except Exception as e:
         import traceback
         print(f"[TTS v2 Sync Error] {e}")

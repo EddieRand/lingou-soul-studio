@@ -1,0 +1,137 @@
+[
+  {
+    "case": "DEVAUTH-05",
+    "variant": "revoke",
+    "passed": true,
+    "observation": {
+      "credential_currently_valid": false,
+      "upstream_frames_before": 1,
+      "upstream_frames_after": 1,
+      "existing_ws_still_open": false,
+      "scope": "real authenticated WS and real send_audio; fake ASR transport; no paid calls"
+    }
+  },
+  {
+    "case": "DEVAUTH-05",
+    "variant": "rotate",
+    "passed": true,
+    "observation": {
+      "credential_currently_valid": false,
+      "upstream_frames_before": 1,
+      "upstream_frames_after": 1,
+      "existing_ws_still_open": false,
+      "scope": "real authenticated WS and real send_audio; fake ASR transport; no paid calls"
+    }
+  },
+  {
+    "case": "DEVAUTH-05",
+    "variant": "unbind",
+    "passed": true,
+    "observation": {
+      "credential_currently_valid": false,
+      "upstream_frames_before": 1,
+      "upstream_frames_after": 1,
+      "existing_ws_still_open": false,
+      "scope": "real authenticated WS and real send_audio; fake ASR transport; no paid calls"
+    }
+  },
+  {
+    "case": "PROTOCOL-06",
+    "variant": "wrong identities",
+    "passed": true,
+    "observation": {
+      "playback_done": false,
+      "audio_failed": false,
+      "marks": [
+        "speech_finalized",
+        "first_audio_synthesized",
+        "first_audio",
+        "first_audio_transferred"
+      ],
+      "terminal_ids": 0
+    }
+  },
+  {
+    "case": "PROTOCOL-06",
+    "variant": "completed before started",
+    "passed": true,
+    "observation": {
+      "playback_done": false,
+      "audio_failed": false,
+      "marks": [
+        "speech_finalized",
+        "first_audio_synthesized",
+        "first_audio",
+        "first_audio_transferred"
+      ],
+      "terminal_ids": 0
+    }
+  },
+  {
+    "case": "PROTOCOL-06",
+    "variant": "completed then failed",
+    "passed": true,
+    "observation": {
+      "playback_done": true,
+      "audio_failed": false,
+      "marks": [
+        "speech_finalized",
+        "first_audio_synthesized",
+        "first_audio",
+        "first_audio_transferred",
+        "first_audio_decoded",
+        "playback_started",
+        "playback_completed"
+      ],
+      "terminal_ids": 1
+    }
+  },
+  {
+    "case": "CARRIER-07",
+    "variant": "partial input creation then output init fails",
+    "passed": true,
+    "observation": {
+      "created": true,
+      "closed": true,
+      "error": "fixture output init failed"
+    }
+  },
+  {
+    "case": "CARRIER-07",
+    "variant": "PTY keyboard + SIGTERM",
+    "passed": true,
+    "observation": {
+      "ready": "READY",
+      "exited_within_2s": true,
+      "output": "COROUTINES_FINISHED\nPROCESS_FINISHED\n"
+    }
+  },
+  {
+    "case": "OUTPUT-05",
+    "variant": "no receipt 30-second timeout",
+    "passed": true,
+    "observation": {
+      "elapsed_seconds": 30.0,
+      "metrics": [
+        {
+          "type": "turn_metrics",
+          "turn_id": "66bbd9fa-556f-4600-9cc0-b14a76b2fdc7",
+          "turn_sequence": 1,
+          "status": "audio_failed",
+          "started_at": "2026-09-16T07:38:11.239361+00:00",
+          "timings": {
+            "speech_finalized_ms": 0.0,
+            "reply_started_ms": 0.1,
+            "first_text_ms": 0.4,
+            "first_audio_synthesized_ms": 0.5,
+            "first_audio_ms": 0.5,
+            "first_audio_transferred_ms": 0.5,
+            "reply_completed_ms": 0.6,
+            "playback_timeout_ms": 30001.8
+          },
+          "session_id": "dfbc3502-eb38-4f9b-8724-765f7a68bcb5"
+        }
+      ]
+    }
+  }
+]

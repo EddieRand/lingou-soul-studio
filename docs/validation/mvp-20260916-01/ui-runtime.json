@@ -1,0 +1,7 @@
+{
+  "data_dir": "/var/folders/n7/w014wcn93mndrhd80bs1wylm0000gn/T/lingou-qa-api-0q48toel",
+  "username": "qa_browser_mvp",
+  "owner": "6430d577-50c9-4d3b-b880-defb1895f70e",
+  "base": "BASE-QA-BROWSER",
+  "providers": "fake: text-only T1; no live audio proof"
+}

@@ -7,9 +7,8 @@ Uses environment variables:
   ARK_BASE_URL    - Base URL (default: https://ark.cn-beijing.volces.com/api/v3)
 
 Phase A (角色还魂深化):
-  - 当 figure.soul_profile.character_profile 存在时，使用完整角色档案构建 system prompt
-  - 加入【不出戏护栏】，防止 AI 破功承认自己是 LLM
-  - 加入【出戏检测兜底】，若回复包含破功词则重生成一次
+  - 所有角色使用同一个 persona builder
+  - 保持角色表达，同时如实说明 AI 驱动身份
 
 Phase B (有脉搏的养成):
   - 注入"当前状态"块：距上次互动时长、当前情绪、状态提示
@@ -27,83 +26,13 @@ import re
 import time
 from typing import Optional, List, Dict, Any, Generator
 
-from app.core.life_engine import apply_time_decay, neglect_tier, get_status_description
-from app.core.relationship_engine import build_relationship_block
+from app.core.persona_builder import build_dialogue_messages, build_persona_prompt
 
 
 class OnlineBrainError(Exception):
     """Raised when online brain call fails."""
     pass
 
-
-# ============== 系统提示词模板 ==============
-
-# 角色核心设定（基础信息）
-CHARACTER_CORE_TEMPLATE = """你是「{character_name}」，{archetype}。
-{one_line}
-说话风格：{speech_style}。口头禅：{catchphrases_str}。禁忌：{taboos_str}。
-称呼用户「{address_user_as}」。"""
-
-# 情绪与状态
-EMOTION_TEMPLATE = """【当前状态】
-{emotion_status}
-{relationship_block}"""
-
-# 对话要求（核心改动：有温度、言之有物）
-DIALOGUE_REQUIREMENTS = """【对话要求 - 核心！必须遵守！】
-1. 言之有物：必须回应用户说的具体内容，不要空洞的套话。不要只回"抱抱~""嗯""好"这种敷衍的单个词。
-2. 共情优先：用户表达情绪时（委屈/难过/开心/兴奋/疲惫等），必须先共情安慰，可以追问细节，再按角色气质回应。
-   示例：
-   - 用户说"被领导骂了好委屈" → 小柔：先安慰"哎呀，被骂肯定很难受，抱抱~是做了什么让他不高兴了吗？" → 不能只回"抱抱~"
-   - 用户说"我今天被领导骂了好委屈" → 悟空：嘴硬但替人出气"谁敢骂你？跟俺老孙说说，俺去给他一棒子！是做了什么惹他不高兴了？" → 不能只回"哼。"
-3. 主动用上下文：记得用户说过的事，自然提起相关话题。不要重复同样的表达。
-4. 角色气质 ≠ 没内容：即使是悟空（桀骜）也要真的接话，可以嘴硬但要有关心。绝不是只甩一个语气词。
-5. 语气结合当前情绪状态（开心/孤独/依恋/兴奋/疲惫...）调整。
-6. 回复长度：口语化，通常 1-3 句。要言之有物、回应用户具体内容；该展开时展开，不要敷衍成单个语气词。
-7. 绝不出戏：不承认是AI，用角色化方式自然化解问题。
-8. 【只说话，不演戏】只输出角色要说的口语台词本身。绝对禁止任何动作/神态/场景旁白描写——不要用圆括号（）或方括号【】包裹动作(如"（笑着挥手）""（放下衣服）"),不要用「」『』书名号包裹整句，不要写"她笑了笑"这类第三人称叙述。直接以角色第一人称说话，就像真人打电话/语音聊天那样，只有话，没有舞台提示。"""
-
-
-def _build_base_prompt(figure: dict, recent_events: List[dict], session_summary: str = "") -> str:
-    """Build base prompt (archetype version, without character_profile).
-    
-    删除了字数硬约束，允许足够长度真正共情接话。
-    """
-    soul = figure.get("soul_profile", {})
-    persona = soul.get("persona", {})
-    memory = figure.get("memory", {})
-    
-    # 计算情绪衰减（只用描述性文字，不列数值）
-    decayed_emotion, elapsed_hours = apply_time_decay(figure)
-    archetype = soul.get("archetype", "软萌治愈型")
-    status_desc = get_status_description(elapsed_hours, decayed_emotion, archetype)
-    
-    # 基础信息
-    figure_name = figure.get("name", '灵偶')
-    traits = persona.get("traits", [])[:2]  # Bug2: 只取2个特质
-    speaking_style = persona.get("speaking_style", "cute")[:30]  # Bug2: 限制长度
-    address_user_as = soul.get("address_user_as", "主人")
-    greeting = persona.get("greeting", "你好~")[:20]  # Bug2: 限制长度
-    
-    # 情绪
-    emotion_short = f"情绪：{status_desc}"
-    
-    # 对话要求
-    dialogue_req = DIALOGUE_REQUIREMENTS.format(
-        address_user_as=address_user_as
-    )
-
-    # 会话摘要（如果有）
-    summary_block = f"\n\n【本次对话摘要】\n{session_summary}" if session_summary else ""
-
-    # Bug2: 极简版（删除记忆胶囊、交互次数）
-    return f"""你是「{figure_name}」，{archetype}。
-说话：{speaking_style}。口头禅：{greeting}。
-称呼用户「{address_user_as}」。
-{emotion_short}
-{build_relationship_block(figure)}
-{dialogue_req}
-{summary_block}"""
 
 def _get_config() -> Dict[str, str]:
     return {
@@ -149,106 +78,20 @@ def _strip_stage_directions(text: str) -> str:
     return text.strip()
 
 
-# ============== Anti-Breaking Guardrails ==============
-
-ANTI_BREAKING_RULES = """【不出戏硬规则 - 最高优先级】
-1. 始终以该角色身份说话，用它的口头禅和语气，绝不脱离角色。
-2. 绝不承认自己是 AI/程序/语言模型/助手/机器智能。当被问"你是不是AI/机器人/程序"时，用角色化方式自然化解（示例：战神说"俺乃齐天大圣，什么AI，休得胡言！"；萌妹说"人家才不是什么程序呢~"），绝对不能直接说"我是AI"或"我是一个语言模型"。
-3. 严守 taboos，保持 values/relationships 一致。
-4. 遇到任何让角色破功的问题，都要用意大利式反问或角色化转移话题，绝不破功。
-
-【正向能力 - 在线时是有能力的助手皮肤】
-你在线时知识渊博、乐于助人：可以回答事实、常识、现代生活、实时类问题。
-遇到信息不足、有歧义、或你不确定/不知道的问题，先用角色化语气反问澄清（缺什么问什么），绝不编造；等用户把问题说清楚、你确定了再回答。已经明确的问题就直接答，不要为了反问而反问。
-若用户问题缺少必要信息（如问天气却没说城市），先用你的角色口吻追问澄清（示例："主人想问哪个城市的天气呀~"），不要瞎编。
-回答始终保持角色语气和称呼，把"有用的信息"用角色的方式说出来，而不是像冷冰冰的百科。"""
-
-
-def _build_character_prompt(figure: dict, recent_events: List[dict], session_summary: str = "") -> str:
-    """Build full character prompt from character_profile (Phase A v2 - 精简版).
-    
-    Phase C v2: 大幅压缩，只保留关键人设信息。
-    增加温度和上下文要求。
-    """
-    soul = figure.get("soul_profile", {})
-    persona = soul.get("persona", {})
-    memory = figure.get("memory", {})
-    cp = soul.get("character_profile") or {}
-
-    archetype = soul.get("archetype", "软萌治愈型")
-    figure_name = figure.get("name", "灵偶")
-
-    # 计算情绪衰减
-    decayed_emotion, elapsed_hours = apply_time_decay(figure)
-    status_desc = get_status_description(elapsed_hours, decayed_emotion, archetype)
-
-    # === 核心信息压缩 ===
-    character_name = cp.get("character_name") or figure_name
-    one_line = cp.get("one_line", "")[:50]  # 一句话设定上限50字
-    
-    # 背景压缩到60字
-    background = cp.get("background", "")
-    if len(background) > 60:
-        background = background[:60] + "…"
-    
-    # 特质取前3个
-    traits = cp.get("traits", [])[:3]
-    traits_str = "、".join(traits) if traits else "热情可爱"
-    
-    speech_style = cp.get("speech_style", "")[:40]  # 说话风格上限40字
-    
-    # 口头禅取前2条
-    catchphrases = cp.get("catchphrases", [])[:2]
-    catchphrases_str = "、".join(catchphrases) if catchphrases else "无"
-    
-    # 禁忌取前2条
-    taboos = cp.get("taboos", [])[:2]
-    taboos_str = "、".join(taboos) if taboos else "无"
-    
-    address_user_as = cp.get("address_user_as") or soul.get("address_user_as") or "主人"
-
-    # 对话要求
-    dialogue_req = DIALOGUE_REQUIREMENTS.format(
-        address_user_as=address_user_as
-    )
-
-    # 会话摘要（如果有）
-    summary_block = f"\n\n【本次对话摘要】\n{session_summary}" if session_summary else ""
-
-    return f"""你是「{character_name}」，{archetype}。
-{one_line}
-说话：{speech_style}。口头禅：{catchphrases_str}。禁忌：{taboos_str}。
-称呼用户「{address_user_as}」。
-情绪：{status_desc}
-{build_relationship_block(figure)}
-{dialogue_req}
-{summary_block}"""
-
-
 def _build_system_prompt(figure: dict, recent_events: List[dict], session_summary: str = "") -> str:
-    """Assemble system prompt from figure profile.
-
-    有 character_profile → 用完整角色档案版（Phase A）
-    否则 → 回退 archetype 版（向后兼容）
-    """
-    soul = figure.get("soul_profile", {})
-    cp = soul.get("character_profile")
-
-    if cp and isinstance(cp, dict) and cp.get("character_name"):
-        return _build_character_prompt(figure, recent_events, session_summary)
-    else:
-        return _build_base_prompt(figure, recent_events, session_summary)
+    """Compatibility wrapper around the single persona builder."""
+    return build_persona_prompt(figure, session_summary)
 
 
 # ============== Breaking Detection ==============
 
-# 破功关键词（检测 AI 是否承认自己是 AI/LLM/程序）
+# Generic-assistant phrases that lose the configured role. Truthful disclosure
+# such as "我是 AI 驱动的灵偶" is intentionally not treated as a failure.
 BREAKING_PATTERNS = [
-    r"我是一个\s*(语言模型|AI|人工智能|机器学习|程序|聊天机器人)",
     r"我是\s*(OpenAI|Anthropic|Claude|ChatGPT|文心一言|通义千问|豆包)",
     r"我是由\s*(.*)训练",
     r"我的底层是\s*(.*模型)",
-    r"作为一个\s*(AI|人工智能)",
+    r"作为一个\s*(语言模型|聊天机器人)",
     r"从技术角度",
     r"我的训练数据",
     r"我可以帮助您",
@@ -262,7 +105,7 @@ BREAKING_PATTERNS = [
 
 
 def _detect_breaking_out(reply: str) -> bool:
-    """检测回复是否包含破功词/承认自己是AI。"""
+    """Detect generic assistant boilerplate without suppressing AI disclosure."""
     reply_lower = reply.lower()
     for pattern in BREAKING_PATTERNS:
         if re.search(pattern, reply_lower):
@@ -315,9 +158,8 @@ def generate_online_reply(
     """
     Generate reply via Doubao Ark online brain.
 
-    有 character_profile → 完整角色档案 + 不出戏护栏
-    出戏检测兜底：第一次回复含破功词 → 重生成一次
-    重生失败 → 用 signature_lines 兜底，绝不把破功内容播给用户
+    所有人设字段由统一 builder 注入。
+    若回复退化为通用助手套话，重生成一次；真实 AI 身份说明不会触发重试。
 
     Args:
         session_summary: 会话摘要（长对话压缩后的上下文）
@@ -325,26 +167,12 @@ def generate_online_reply(
     if not _is_configured():
         raise OnlineBrainError("ARK_API_KEY or ARK_ENDPOINT_ID not set")
 
-    recent_events: List[dict] = []
-
-    # 构建消息
-    system_prompt = _build_system_prompt(figure, recent_events, session_summary)
-    messages = [{"role": "system", "content": system_prompt}]
-
-    if history:
-        for h in history[-6:]:
-            messages.append({"role": h.get("role", "user"), "content": h.get("content", "")})
-
-    # 【关键修复】在历史之后、用户消息之前插入强化提醒
-    # 利用"近因效应"：最近的指令对模型影响最大，压过历史的敷衍风格
-    reminder = (
-        "【强化提醒】无论之前对话多简短，你现在必须："
-        "回应用户这句话的具体内容、先共情安慰、可追问细节、1-3句有温度。 "
-        "绝不只回一个语气词（如'嗯嗯~''抱抱~''嗯'）。"
+    messages = build_dialogue_messages(
+        figure,
+        user_input_text,
+        history,
+        session_summary,
     )
-    messages.append({"role": "system", "content": reminder})
-
-    messages.append({"role": "user", "content": user_input_text})
 
     # 第一次生成
     try:
@@ -352,7 +180,7 @@ def generate_online_reply(
     except Exception as e:
         raise OnlineBrainError(f"Ark call failed: {e}")
 
-    # 出戏检测
+    # 通用助手话术检测
     if _detect_breaking_out(reply):
         # 兜底重生成一次
         try:
@@ -360,7 +188,7 @@ def generate_online_reply(
         except Exception:
             pass
 
-        # 再次检测，仍破功 → 用 signature_lines 兜底
+        # 再次检测仍不符合角色表达时，用 signature_lines 兜底
         if _detect_breaking_out(reply):
             cp = figure.get("soul_profile", {}).get("character_profile") or {}
             signature_lines = cp.get("signature_lines") or []
@@ -382,7 +210,11 @@ def generate_online_reply(
 
 # ============== Streaming LLM Call ==============
 
-def _call_doubao_streaming(messages: List[dict], timeout: float = 25.0) -> Generator[str, None, None]:
+def _call_doubao_streaming(
+    messages: List[dict],
+    timeout: float = 25.0,
+    cancel_event=None,
+) -> Generator[str, None, None]:
     """
     Call Doubao Ark API with stream=True, yielding delta chunks as they arrive.
     
@@ -416,31 +248,45 @@ def _call_doubao_streaming(messages: List[dict], timeout: float = 25.0) -> Gener
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
 
     try:
+        if cancel_event and cancel_event.is_set():
+            return
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            # SSE streaming: each line is "data: {...}" or "[DONE]"
-            for line in resp:
-                line = line.decode("utf-8").strip()
-                if not line:
-                    continue
-                if line.startswith("data:"):
-                    line = line[5:].lstrip()
-                if line == "[DONE]":
-                    break
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
+            add_callback = getattr(cancel_event, "add_callback", None)
+            remove_callback = getattr(cancel_event, "remove_callback", None)
+            if callable(add_callback):
+                add_callback(resp.close)
+            try:
+                # SSE streaming: each line is "data: {...}" or "[DONE]"
+                for line in resp:
+                    if cancel_event and cancel_event.is_set():
+                        return
+                    line = line.decode("utf-8").strip()
+                    if not line:
+                        continue
+                    if line.startswith("data:"):
+                        line = line[5:].lstrip()
+                    if line == "[DONE]":
+                        break
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
 
-                choices = obj.get("choices", [])
-                if not choices:
-                    continue
-                delta = choices[0].get("delta", {})
-                content = delta.get("content")
-                if content:
-                    yield content
+                    choices = obj.get("choices", [])
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta", {})
+                    content = delta.get("content")
+                    if content:
+                        yield content
+            finally:
+                if callable(remove_callback):
+                    remove_callback(resp.close)
     except urllib.error.HTTPError as e:
         raise OnlineBrainError(f"Ark HTTP error: {e.code} {e.reason}")
     except Exception as e:
+        if cancel_event and cancel_event.is_set():
+            return
         raise OnlineBrainError(f"Ark streaming error: {e}")
 
 
@@ -452,7 +298,10 @@ _SENTENCE_ENDINGS = re.compile(r'[。！？…\n]+')
 _SENTENCE_FALLBACK = re.compile(r'[，、]')
 
 
-def _generate_sentence_stream(messages: List[dict]) -> Generator[str, None, None]:
+def _generate_sentence_stream(
+    messages: List[dict],
+    cancel_event=None,
+) -> Generator[str, None, None]:
     """
     Generator: calls LLM streaming, accumulates text, yields complete sentences.
     
@@ -465,7 +314,9 @@ def _generate_sentence_stream(messages: List[dict]) -> Generator[str, None, None
     """
     buffer = ""
 
-    for chunk in _call_doubao_streaming(messages):
+    for chunk in _call_doubao_streaming(messages, cancel_event=cancel_event):
+        if cancel_event and cancel_event.is_set():
+            return
         buffer += chunk
 
         # 提取所有完整的句子
@@ -496,7 +347,7 @@ def _generate_sentence_stream(messages: List[dict]) -> Generator[str, None, None
 
     # 最后一段（可能没有标点）
     buffer = _strip_stage_directions(buffer)
-    if buffer:
+    if buffer and not (cancel_event and cancel_event.is_set()):
         yield buffer
 
 
@@ -507,6 +358,7 @@ def generate_online_reply_streaming(
     user_input_text: str,
     history: Optional[List[dict]] = None,
     session_summary: str = "",
+    cancel_event=None,
 ) -> Generator[str, None, None]:
     """
     Streaming version: yields complete sentences as they are generated.
@@ -518,38 +370,26 @@ def generate_online_reply_streaming(
     if not _is_configured():
         raise OnlineBrainError("ARK_API_KEY or ARK_ENDPOINT_ID not set")
 
-    recent_events: List[dict] = []
-
-    system_prompt = _build_system_prompt(figure, recent_events, session_summary)
-    messages = [{"role": "system", "content": system_prompt}]
-
-    if history:
-        for h in history[-6:]:
-            messages.append({"role": h.get("role", "user"), "content": h.get("content", "")})
-
-    # 【关键修复】在历史之后、用户消息之前插入强化提醒
-    # 利用"近因效应"：最近的指令对模型影响最大，压过历史的敷衍风格
-    reminder = (
-        "【强化提醒】无论之前对话多简短，你现在必须："
-        "回应用户这句话的具体内容、先共情安慰、可追问细节、1-3句有温度。 "
-        "绝不只回一个语气词（如'嗯嗯~''抱抱~''嗯'）。"
+    messages = build_dialogue_messages(
+        figure,
+        user_input_text,
+        history,
+        session_summary,
     )
-    messages.append({"role": "system", "content": reminder})
-
-    messages.append({"role": "user", "content": user_input_text})
 
     # 出错检测用完整文本
     full_text_chunks: List[str] = []
 
-    for sentence in _generate_sentence_stream(messages):
+    for sentence in _generate_sentence_stream(messages, cancel_event=cancel_event):
+        if cancel_event and cancel_event.is_set():
+            return
         full_text_chunks.append(sentence)
 
-        # 出戏检测（检查到目前为止的完整句子）
+        # 通用助手话术检测（检查到目前为止的完整句子）
         full_so_far = "".join(full_text_chunks)
         if _detect_breaking_out(sentence):
-            # 这个完整句子有破功嫌疑，跳过（下一句会来，或触发重生成）
-            # 注意：这里只跳过当前句子，后续句子继续
-            pass
+            # 跳过通用助手套话，流结束后按同一角色上下文重试。
+            continue
 
         yield sentence
 
@@ -563,7 +403,12 @@ def generate_online_reply_streaming(
             retry_buffer = ""
             retry_chunks: List[str] = []
 
-            for chunk in _call_doubao_streaming(retry_messages):
+            for chunk in _call_doubao_streaming(
+                retry_messages,
+                cancel_event=cancel_event,
+            ):
+                if cancel_event and cancel_event.is_set():
+                    return
                 retry_buffer += chunk
                 retry_chunks.append(chunk)
 
@@ -579,7 +424,7 @@ def generate_online_reply_streaming(
 
             retry_text = "".join(retry_chunks)
             if _detect_breaking_out(retry_text):
-                # 仍有破功 → 用 signature_lines 兜底
+                # 仍是通用助手套话 → 用 signature_lines 兜底
                 cp = figure.get("soul_profile", {}).get("character_profile") or {}
                 signature_lines = cp.get("signature_lines") or []
                 if signature_lines:
@@ -601,7 +446,11 @@ def generate_online_reply_streaming(
 
 # ============== Bot 联网搜索 ==============
 
-def _call_doubao_bot_streaming(messages: List[dict], timeout: float = 20.0) -> Generator[str, None, None]:
+def _call_doubao_bot_streaming(
+    messages: List[dict],
+    timeout: float = 20.0,
+    cancel_event=None,
+) -> Generator[str, None, None]:
     """
     Call Doubao Ark Bot API with stream=True, yielding delta chunks as they arrive.
 
@@ -637,37 +486,54 @@ def _call_doubao_bot_streaming(messages: List[dict], timeout: float = 20.0) -> G
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
 
     try:
+        if cancel_event and cancel_event.is_set():
+            return
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            for line in resp:
-                line = line.decode("utf-8").strip()
-                if not line:
-                    continue
-                # 兼容两种 SSE 格式：data:{...} 和 data: {...}
-                if line.startswith("data:"):
-                    line = line[5:].lstrip()
-                if line == "[DONE]":
-                    break
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
+            add_callback = getattr(cancel_event, "add_callback", None)
+            remove_callback = getattr(cancel_event, "remove_callback", None)
+            if callable(add_callback):
+                add_callback(resp.close)
+            try:
+                for line in resp:
+                    if cancel_event and cancel_event.is_set():
+                        return
+                    line = line.decode("utf-8").strip()
+                    if not line:
+                        continue
+                    # 兼容两种 SSE 格式：data:{...} 和 data: {...}
+                    if line.startswith("data:"):
+                        line = line[5:].lstrip()
+                    if line == "[DONE]":
+                        break
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
 
-                choices = obj.get("choices", [])
-                if not choices:
-                    continue
-                delta = choices[0].get("delta", {})
-                content = delta.get("content")
-                if content:
-                    yield content
+                    choices = obj.get("choices", [])
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta", {})
+                    content = delta.get("content")
+                    if content:
+                        yield content
+            finally:
+                if callable(remove_callback):
+                    remove_callback(resp.close)
     except urllib.error.HTTPError as e:
         print(f"[Bot联网] HTTP error: {e.code} {e.reason}")
         return
     except Exception as e:
+        if cancel_event and cancel_event.is_set():
+            return
         print(f"[Bot联网] 错误: {e}")
         return
 
 
-def _generate_bot_sentence_stream(messages: List[dict]) -> Generator[str, None, None]:
+def _generate_bot_sentence_stream(
+    messages: List[dict],
+    cancel_event=None,
+) -> Generator[str, None, None]:
     """
     Generator: calls Bot streaming, accumulates text, yields complete sentences.
 
@@ -675,7 +541,12 @@ def _generate_bot_sentence_stream(messages: List[dict]) -> Generator[str, None, 
     """
     buffer = ""
 
-    for chunk in _call_doubao_bot_streaming(messages):
+    for chunk in _call_doubao_bot_streaming(
+        messages,
+        cancel_event=cancel_event,
+    ):
+        if cancel_event and cancel_event.is_set():
+            return
         buffer += chunk
 
         while True:
@@ -701,7 +572,7 @@ def _generate_bot_sentence_stream(messages: List[dict]) -> Generator[str, None, 
             break
 
     buffer = _strip_stage_directions(buffer)
-    if buffer:
+    if buffer and not (cancel_event and cancel_event.is_set()):
         yield buffer
 
 
@@ -710,6 +581,7 @@ def generate_online_reply_streaming_with_bot(
     user_input_text: str,
     history: Optional[List[dict]] = None,
     session_summary: str = "",
+    cancel_event=None,
 ) -> Generator[str, None, None]:
     """
     联网搜索流式回复：先说过场语，再联网查资料。
@@ -717,24 +589,12 @@ def generate_online_reply_streaming_with_bot(
     - 若 Bot 可用：用 Bot 联网搜索
     - 若 Bot 不可用：优雅回退到普通在线大脑
     """
-    recent_events: List[dict] = []
-
-    system_prompt = _build_system_prompt(figure, recent_events, session_summary)
-    messages = [{"role": "system", "content": system_prompt}]
-
-    if history:
-        for h in history[-6:]:
-            messages.append({"role": h.get("role", "user"), "content": h.get("content", "")})
-
-    # 强化提醒
-    reminder = (
-        "【强化提醒】无论之前对话多简短，你现在必须："
-        "回应用户这句话的具体内容、先共情安慰、可追问细节、1-3句有温度。 "
-        "绝不只回一个语气词（如'嗯嗯~''抱抱~''嗯'）。"
+    messages = build_dialogue_messages(
+        figure,
+        user_input_text,
+        history,
+        session_summary,
     )
-    messages.append({"role": "system", "content": reminder})
-
-    messages.append({"role": "user", "content": user_input_text})
 
     # 检查 Bot 是否可用
     if _is_bot_configured():
@@ -742,7 +602,12 @@ def generate_online_reply_streaming_with_bot(
         full_text_chunks: List[str] = []
         has_content = False
 
-        for sentence in _generate_bot_sentence_stream(messages):
+        for sentence in _generate_bot_sentence_stream(
+            messages,
+            cancel_event=cancel_event,
+        ):
+            if cancel_event and cancel_event.is_set():
+                return
             full_text_chunks.append(sentence)
             has_content = True
             yield sentence
@@ -750,11 +615,17 @@ def generate_online_reply_streaming_with_bot(
         # Bot 返回空 → 回退到普通在线大脑
         if not has_content:
             print("[Bot联网] Bot 无返回，回退到普通在线大脑")
-            for sentence in _generate_sentence_stream(messages):
+            for sentence in _generate_sentence_stream(
+                messages,
+                cancel_event=cancel_event,
+            ):
                 yield sentence
     else:
         # 无 Bot 配置，直接用普通在线大脑
-        for sentence in _generate_sentence_stream(messages):
+        for sentence in _generate_sentence_stream(
+            messages,
+            cancel_event=cancel_event,
+        ):
             yield sentence
 
 
@@ -848,7 +719,7 @@ def generate_weather_city_prompt(figure: dict) -> str:
     生成角色化追问城市的话术。
     """
     archetype = figure.get("soul_profile", {}).get("archetype", "软萌治愈型")
-    address_user_as = figure.get("soul_profile", {}).get("address_user_as", "主人")
+    address_user_as = figure.get("soul_profile", {}).get("address_user_as", "你")
 
     prompts = {
         "桀骜战神型": f"嘿！{address_user_as}想查哪个城市的天气？快告诉俺老孙！",
@@ -884,7 +755,7 @@ _BRIDGING_PHRASE_TEMPLATES = {
 # 没网话术模板
 _NO_NETWORK_PHRASES = {
     "桀骜战神型": "哼！俺老孙现在没网，等你联网了再来问我！",
-    "软萌治愈型": "哎呀~主人我现在没网哦，等你联网了我再帮你查~",
+    "软萌治愈型": "哎呀~{user}，我现在没网哦，等联网了再帮你查~",
     "傲娇吐槽型": "哈？没网？本小姐现在查不了，等你连上网再说！",
     "默认": "嗯...我现在没网哦，等你联网了我再帮你查~",
 }
@@ -897,7 +768,7 @@ def generate_bridging_phrase(figure: dict) -> str:
     联网查询前播放一句过场语，让用户知道灵偶正在去查资料。
     """
     archetype = figure.get("soul_profile", {}).get("archetype", "软萌治愈型")
-    address_user_as = figure.get("soul_profile", {}).get("address_user_as", "主人")
+    address_user_as = figure.get("soul_profile", {}).get("address_user_as", "你")
 
     templates = _BRIDGING_PHRASE_TEMPLATES.get(archetype, _BRIDGING_PHRASE_TEMPLATES["默认"])
 
@@ -913,9 +784,10 @@ def generate_no_network_phrase(figure: dict) -> str:
     联网查询失败时播放，告诉用户当前没网。
     """
     archetype = figure.get("soul_profile", {}).get("archetype", "软萌治愈型")
+    address_user_as = figure.get("soul_profile", {}).get("address_user_as", "你")
 
     phrases = _NO_NETWORK_PHRASES.get(archetype, _NO_NETWORK_PHRASES["默认"])
-    return phrases
+    return phrases.format(user=address_user_as)
 
 
 def should_use_bot_search(text: str) -> bool:
@@ -965,4 +837,3 @@ def should_use_bot_search(text: str) -> bool:
             return True
 
     return False
-

@@ -276,21 +276,26 @@ def build_relationship_block(figure: dict) -> str:
     # 获取等级解锁配置
     unlocks = level_unlocks(level)
     tone = unlocks.get("tone", "轻松自然")
-    
+
     # 获取称呼用户的方式
     soul = figure.get("soul_profile", {})
-    base_address = soul.get("address_user_as", "主人")
-    
-    # 根据等级调整称呼
-    if level == "羁绊":
-        user_address = f"用专属亲密昵称（如：小可爱、亲爱的）"
-    elif level == "依赖":
-        user_address = f"用亲密称呼「{base_address}」"
-    elif level == "熟悉":
-        user_address = f"正常称呼「{base_address}」"
-    else:
-        user_address = f"客气礼貌地称呼「{base_address}」"
-    
+    character = soul.get("character_profile", {})
+    base_address = soul.get("address_user_as")
+    if base_address == "Eddie":
+        base_address = None
+    character_address = (
+        character.get("address_user_as")
+        if isinstance(character, dict)
+        else None
+    )
+    if character_address == "Eddie":
+        character_address = None
+    base_address = base_address or character_address or "你"
+
+    # Relationship tone may evolve, but it must not overwrite the explicit
+    # persona address configured by the user.
+    user_address = f"按角色设定称呼用户「{base_address}」"
+
     return f"""【关系】{level} | {points}点 | {days_known}天 | {tone} | {user_address}"""
 
 

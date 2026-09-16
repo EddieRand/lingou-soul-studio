@@ -4,20 +4,25 @@ Voice API: TTS synthesis, voice design, speaker list.
 Day 6: Volcano TTS integration with system_say fallback.
 """
 import sys
+import hashlib
+import mimetypes
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Response
 from typing import Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
-from data.store import save_voice_upload, get_figure, save_figure
+from app.api.auth import get_current_user
+from app.api.dev_tools import require_dev_tools
+from app.api.ownership import current_user_id, owned_figure_or_404, resource_not_found
+from data.store import figure_storage_key, resolve_voice_reference, save_voice_upload, save_figure
 from app.core.tts_adapter import (
-    synthesize_and_save,
-    speak_with_engine,
+    synthesize_for_delivery,
     is_volc_configured,
     is_voice_pool_ready,
     precache_voice_pool,
@@ -25,6 +30,10 @@ from app.core.tts_adapter import (
 )
 
 router = APIRouter()
+
+
+class _StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 
 # ============== Voice Upload (Day 5) =============
@@ -35,18 +44,24 @@ async def voice_upload(
     audio: UploadFile = File(...),
     consent_agreed: bool = Form(...),
     consent_text_version: str = Form("v1"),
+    current_user: dict = Depends(get_current_user),
 ):
     """Upload reference audio for voice cloning (MVP: saves file + updates status only)."""
-    figure = get_figure(figure_id)
-    if not figure:
-        raise HTTPException(status_code=404, detail="找不到这个灵偶")
+    require_dev_tools()
+    owner_user_id = current_user_id(current_user)
+    figure = owned_figure_or_404(figure_id, owner_user_id)
 
     # 【合规检查】必须同意授权声明
     if not consent_agreed:
         raise HTTPException(status_code=400, detail="需先确认音色授权声明")
 
     contents = await audio.read()
-    saved_path = save_voice_upload(figure_id, audio.filename or "recording.wav", contents)
+    saved_path = save_voice_upload(
+        figure_id,
+        audio.filename or "recording.wav",
+        contents,
+        user_id=owner_user_id,
+    )
 
     voice_profile = figure.get("voice_profile", {})
     voice_profile["voice_mode"] = "voice_clone"
@@ -64,7 +79,7 @@ async def voice_upload(
 
     figure["voice_profile"] = voice_profile
     figure["updated_at"] = datetime.utcnow().isoformat()
-    save_figure(figure_id, figure)
+    save_figure(figure_id, figure, user_id=owner_user_id)
 
     return {
         "voice_profile": voice_profile,
@@ -74,93 +89,242 @@ async def voice_upload(
 
 # ============== Voice Generate =============
 
-class VoiceGenerateRequest(BaseModel):
+class VoiceGenerateRequest(_StrictModel):
     figure_id: str
-    text: str
+    text: str = Field(min_length=1, max_length=500)
     speaker: Optional[str] = None   # override figure's default speaker
 
 
+def _available_speaker(speaker_id: str) -> Optional[dict]:
+    return next(
+        (
+            speaker
+            for speaker in _load_voice_library()
+            if speaker.get("speaker_id") == speaker_id
+            and not speaker.get("ip_risk", False)
+        ),
+        None,
+    )
+
+
+def _require_available_speaker(speaker_id: str) -> dict:
+    speaker = _available_speaker(speaker_id)
+    if speaker is None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "VOICE_SPEAKER_UNAVAILABLE",
+                "message": "所选声线不可用，请重新选择",
+            },
+        )
+    return speaker
+
+
+def _audio_media_type(path: Path) -> str:
+    guessed, _ = mimetypes.guess_type(path.name)
+    return guessed if guessed and guessed.startswith("audio/") else "audio/mpeg"
+
+
+def _download_catalog_demo(speaker: dict) -> tuple[bytes, str] | None:
+    demo_url = str(speaker.get("demo_url") or "")
+    if not demo_url.startswith("https://"):
+        return None
+    try:
+        with httpx.Client(
+            timeout=httpx.Timeout(15.0, connect=5.0),
+            follow_redirects=True,
+        ) as client:
+            response = client.get(demo_url)
+        content_type = response.headers.get("content-type", "").split(";", 1)[0]
+        if (
+            response.status_code != 200
+            or not response.content
+            or len(response.content) > 10 * 1024 * 1024
+            or not content_type.startswith("audio/")
+        ):
+            return None
+        return response.content, content_type
+    except Exception:
+        return None
+
+
 @router.post("/generate")
-def voice_generate(req: VoiceGenerateRequest):
-    """
-    Synthesize audio for given text using the figure's TTS engine.
-    Plays audio via afplay (volcano) or say (system), and returns audio_path.
-    """
-    figure = get_figure(req.figure_id)
-    if not figure:
-        raise HTTPException(status_code=404, detail="找不到这个灵偶")
+def voice_generate(
+    req: VoiceGenerateRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Compatibility endpoint: synthesize a file without server-side playback."""
+    owner_user_id = current_user_id(current_user)
+    figure = owned_figure_or_404(req.figure_id, owner_user_id)
 
-    voice_profile = figure.get("voice_profile", {})
-    soul_profile = figure.get("soul_profile", {})
-
-    # Debug
-    import app.core.tts_adapter as tts_adapter
-    cfg = tts_adapter._volc_config()
-    print(f"[DEBUG voice/generate] tts_engine={voice_profile.get('tts_engine')} configured={tts_adapter.is_volc_configured()} api_key={cfg.get('api_key','?')[:8]} speaker={cfg.get('default_speaker')}", flush=True)
-
-    # synthesize + play
-    result = speak_with_engine(
+    if req.speaker:
+        _require_available_speaker(req.speaker)
+    voice_profile = dict(figure.get("voice_profile", {}))
+    result = synthesize_for_delivery(
         text=req.text,
         voice_profile=voice_profile,
-        figure_id=req.figure_id,
-        async_mode=True,
-        soul_profile=soul_profile,
+        figure_id=figure_storage_key(owner_user_id, req.figure_id),
+        speaker=req.speaker,
     )
+    if not result["success"]:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "VOICE_AUDIO_UNAVAILABLE",
+                "message": "语音合成失败，未生成可播放音频",
+            },
+        )
 
     return {
         "text": req.text,
         "engine": result["engine"],
         "audio_path": result.get("audio_path"),
-        "success": result["success"],
-        "speaker": voice_profile.get("speaker") or req.speaker,
+        "success": True,
+        "speaker": req.speaker or voice_profile.get("speaker"),
         "figure_id": req.figure_id,
         "voice_profile": voice_profile,
+        "delivery_target": "generated_file",
     }
+
+
+class VoicePreviewRequest(_StrictModel):
+    text: str = Field(min_length=1, max_length=500)
+    speaker: Optional[str] = None
+    figure_id: Optional[str] = None
+
+
+@router.post("/preview")
+def voice_preview(
+    req: VoicePreviewRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Return authenticated audio bytes for playback on the requesting client."""
+    owner_user_id = current_user_id(current_user)
+    speaker_meta = _require_available_speaker(req.speaker) if req.speaker else None
+
+    if req.figure_id:
+        figure = owned_figure_or_404(req.figure_id, owner_user_id)
+        voice_profile = dict(figure.get("voice_profile", {}))
+        storage_id = figure_storage_key(owner_user_id, req.figure_id)
+        if (
+            speaker_meta is None
+            and voice_profile.get("voice_mode") != "voice_clone"
+            and voice_profile.get("speaker")
+        ):
+            speaker_meta = _available_speaker(str(voice_profile["speaker"]))
+    else:
+        if speaker_meta is None:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "VOICE_PREVIEW_TARGET_REQUIRED",
+                    "message": "请选择要试听的声线",
+                },
+            )
+        voice_profile = {"tts_engine": "volcano_tts", "speaker": req.speaker}
+        owner_digest = hashlib.sha256(owner_user_id.encode("utf-8")).hexdigest()[:24]
+        storage_id = f"preview-{owner_digest}"
+
+    result = synthesize_for_delivery(
+        req.text.strip(),
+        voice_profile,
+        storage_id,
+        speaker=req.speaker,
+    )
+    audio_bytes: bytes | None = None
+    media_type = "audio/mpeg"
+    source = "synthesized"
+
+    if result["success"] and result.get("audio_path"):
+        audio_path = Path(str(result["audio_path"]))
+        try:
+            audio_bytes = audio_path.read_bytes()
+            media_type = _audio_media_type(audio_path)
+        except OSError:
+            audio_bytes = None
+
+    # Preset voices may still be previewed from the catalog when live custom
+    # synthesis is unavailable. The source header prevents treating that
+    # sample as synthesis of the submitted text.
+    if not audio_bytes and speaker_meta is not None:
+        catalog_audio = _download_catalog_demo(speaker_meta)
+        if catalog_audio:
+            audio_bytes, media_type = catalog_audio
+            source = "catalog_demo"
+            result = {**result, "engine": "catalog_demo"}
+
+    if not audio_bytes:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "VOICE_AUDIO_UNAVAILABLE",
+                "message": "没有生成可播放音频，请检查语音服务后重试",
+            },
+        )
+
+    effective_speaker = req.speaker or str(voice_profile.get("speaker") or "")
+    return Response(
+        content=audio_bytes,
+        media_type=media_type,
+        headers={
+            "Cache-Control": "no-store",
+            "X-Lingou-Audio-Engine": str(result.get("engine") or "unknown"),
+            "X-Lingou-Audio-Source": source,
+            "X-Lingou-Voice-Speaker": effective_speaker,
+            "X-Lingou-Audio-Synthesized-At": datetime.now(timezone.utc).isoformat(),
+        },
+    )
 
 
 # ============== Voice Pool Precache =============
 
-class VoicePrecacheRequest(BaseModel):
+class VoicePrecacheRequest(_StrictModel):
     figure_id: str
 
 
 @router.post("/precache")
-def voice_precache(req: VoicePrecacheRequest):
+def voice_precache(
+    req: VoicePrecacheRequest,
+    current_user: dict = Depends(get_current_user),
+):
     """
     Pre-synthesize all voice pool texts for a figure using its volcano speaker.
     Stores mp3s in data/voice_pool/{figure_id}/.
     Returns {total, success, failed, voice_pool_ready}.
     """
-    figure = get_figure(req.figure_id)
-    if not figure:
-        raise HTTPException(status_code=404, detail="找不到这个灵偶")
+    owner_user_id = current_user_id(current_user)
+    figure = owned_figure_or_404(req.figure_id, owner_user_id)
+    storage_id = figure_storage_key(owner_user_id, req.figure_id)
 
     voice_profile = figure.get("voice_profile", {})
     archetype = figure.get("soul_profile", {}).get("archetype", "软萌治愈型")
 
     result = precache_voice_pool(
-        figure_id=req.figure_id,
+        figure_id=storage_id,
         voice_profile=voice_profile,
         archetype=archetype,
         figure=figure,
     )
-    result["voice_pool_ready"] = is_voice_pool_ready(req.figure_id)
+    result["voice_pool_ready"] = is_voice_pool_ready(storage_id)
 
     return result
 
 
 @router.get("/pool-status/{figure_id}")
-def voice_pool_status(figure_id: str):
+def voice_pool_status(
+    figure_id: str,
+    current_user: dict = Depends(get_current_user),
+):
     """Return voice pool status for a figure."""
-    figure = get_figure(figure_id)
-    if not figure:
-        raise HTTPException(status_code=404, detail="找不到这个灵偶")
+    owner_user_id = current_user_id(current_user)
+    owned_figure_or_404(figure_id, owner_user_id)
+    storage_id = figure_storage_key(owner_user_id, figure_id)
 
-    ready = is_voice_pool_ready(figure_id)
+    ready = is_voice_pool_ready(storage_id)
     index = {}
     if ready:
         from app.core.tts_adapter import load_voice_pool_index
-        index = load_voice_pool_index(figure_id)
+        index = load_voice_pool_index(storage_id)
 
     return {
         "figure_id": figure_id,
@@ -171,21 +335,24 @@ def voice_pool_status(figure_id: str):
 
 # ============== Voice Design =============
 
-class VoiceDesignRequest(BaseModel):
+class VoiceDesignRequest(_StrictModel):
     figure_id: str
     speaker: str                      # volcano speaker ID to set
     tts_engine: Optional[str] = None  # optional: change engine too
 
 
 @router.post("/design")
-def voice_design(req: VoiceDesignRequest):
+def voice_design(
+    req: VoiceDesignRequest,
+    current_user: dict = Depends(get_current_user),
+):
     """
     Set / switch the figure's volcano speaker.
     Updates voice_profile.speaker + tts_engine=volcano_tts.
     """
-    figure = get_figure(req.figure_id)
-    if not figure:
-        raise HTTPException(status_code=404, detail="找不到这个灵偶")
+    owner_user_id = current_user_id(current_user)
+    figure = owned_figure_or_404(req.figure_id, owner_user_id)
+    _require_available_speaker(req.speaker)
 
     voice_profile = figure.get("voice_profile", {})
     voice_profile["speaker"] = req.speaker
@@ -196,10 +363,10 @@ def voice_design(req: VoiceDesignRequest):
 
     figure["voice_profile"] = voice_profile
     figure["updated_at"] = datetime.utcnow().isoformat()
-    save_figure(req.figure_id, figure)
+    saved = save_figure(req.figure_id, figure, user_id=owner_user_id)
 
     return {
-        "voice_profile": voice_profile,
+        "voice_profile": saved["voice_profile"],
         "message": f"Speaker set to {req.speaker}",
     }
 
@@ -290,17 +457,20 @@ def _fallback_speakers() -> list:
 
 # ============== Voice Clone (VoxCPM) =============
 
-class VoiceCloneStartRequest(BaseModel):
+class VoiceCloneStartRequest(_StrictModel):
     figure_id: str
     prompt_text: Optional[str] = ""
 
 
 @router.post("/clone/start")
-async def voice_clone_start(req: VoiceCloneStartRequest):
+async def voice_clone_start(
+    req: VoiceCloneStartRequest,
+    current_user: dict = Depends(get_current_user),
+):
     """开始声音克隆（VoxCPM 零样本克隆，无需训练）。"""
-    figure = get_figure(req.figure_id)
-    if not figure:
-        raise HTTPException(status_code=404, detail="找不到这个灵偶")
+    require_dev_tools()
+    owner_user_id = current_user_id(current_user)
+    figure = owned_figure_or_404(req.figure_id, owner_user_id)
 
     voice_profile = figure.get("voice_profile", {})
     
@@ -313,17 +483,24 @@ async def voice_clone_start(req: VoiceCloneStartRequest):
     recording_url = voice_profile.get("recording_url")
     if not recording_url:
         raise HTTPException(status_code=400, detail="请先上传参考音频")
+    try:
+        reference = resolve_voice_reference(
+            recording_url,
+            storage_key=figure_storage_key(owner_user_id, req.figure_id),
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise resource_not_found() from exc
 
     # VoxCPM 零样本克隆：无需训练，直接就绪
     voice_profile["clone_engine"] = "voxcpm"
-    voice_profile["clone_ref_path"] = recording_url
+    voice_profile["clone_ref_path"] = str(reference)
     voice_profile["clone_prompt_text"] = req.prompt_text or ""
     voice_profile["voice_mode"] = "voice_clone"
     voice_profile["clone_status"] = "ready"
     
     figure["voice_profile"] = voice_profile
     figure["updated_at"] = datetime.utcnow().isoformat()
-    save_figure(req.figure_id, figure)
+    save_figure(req.figure_id, figure, user_id=owner_user_id)
 
     return {
         "clone_status": "ready",
@@ -333,11 +510,14 @@ async def voice_clone_start(req: VoiceCloneStartRequest):
 
 
 @router.get("/clone/status")
-def voice_clone_status(figure_id: str):
+def voice_clone_status(
+    figure_id: str,
+    current_user: dict = Depends(get_current_user),
+):
     """查询克隆状态（VoxCPM 直接返回已就绪）。"""
-    figure = get_figure(figure_id)
-    if not figure:
-        raise HTTPException(status_code=404, detail="找不到这个灵偶")
+    require_dev_tools()
+    owner_user_id = current_user_id(current_user)
+    figure = owned_figure_or_404(figure_id, owner_user_id)
 
     voice_profile = figure.get("voice_profile", {})
     clone_status = voice_profile.get("clone_status", "not_started")

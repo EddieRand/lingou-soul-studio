@@ -14,11 +14,17 @@ from typing import Optional
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from data.store import get_base, get_figure
+from data.store import get_base_for_owner, get_figure
 from app.core.dialogue_state import transition, set_figure
 
 
-def detect_wake(base_id: str, trigger: str, text: Optional[str] = None) -> bool:
+def detect_wake(
+    base_id: str,
+    trigger: str,
+    text: Optional[str] = None,
+    *,
+    owner_user_id: str,
+) -> bool:
     """
     Attempt to wake dialogue for base_id.
 
@@ -28,7 +34,7 @@ def detect_wake(base_id: str, trigger: str, text: Optional[str] = None) -> bool:
     Returns True if wake succeeded (matched wake name or direct trigger).
     """
     # Resolve active figure
-    base = get_base(base_id)
+    base = get_base_for_owner(base_id, owner_user_id)
     if not base:
         return False
 
@@ -36,7 +42,7 @@ def detect_wake(base_id: str, trigger: str, text: Optional[str] = None) -> bool:
     if not figure_id:
         return False
 
-    figure = get_figure(figure_id)
+    figure = get_figure(figure_id, user_id=owner_user_id)
     if not figure:
         return False
 

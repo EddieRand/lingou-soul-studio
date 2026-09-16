@@ -1,84 +1,58 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
+
+import { apiBases } from '../services/api'
 import { isOnboardingDone, markOnboardingDone } from '../utils/onboarding'
-
-interface OnboardingStep {
-  image: string
-  title: string
-  primaryAction: string
-}
-
-const steps: OnboardingStep[] = [
-  {
-    image: '/onboarding/onboarding-step-1.png',
-    title: '绑定你的灵偶底座',
-    primaryAction: '下一步',
-  },
-  {
-    image: '/onboarding/onboarding-step-2.png',
-    title: '为手办创建 Soul Profile',
-    primaryAction: '下一步',
-  },
-  {
-    image: '/onboarding/onboarding-step-3.png',
-    title: '叫名字，或触摸底座',
-    primaryAction: '开始创建',
-  },
-]
 
 export default function OnboardingPage() {
   const navigate = useNavigate()
-  const [stepIndex, setStepIndex] = useState(0)
-  const currentStep = steps[stepIndex]
-
-  const stepLabel = useMemo(() => `${stepIndex + 1} / ${steps.length}`, [stepIndex])
 
   useEffect(() => {
+    let cancelled = false
     if (isOnboardingDone()) {
       navigate('/home', { replace: true })
+      return
+    }
+    apiBases.list()
+      .then(bases => {
+        if (cancelled || bases.length === 0) return
+        markOnboardingDone()
+        navigate('/home', { replace: true })
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
     }
   }, [navigate])
 
-  function complete(destination: '/home' | '/create') {
+  function startSetup() {
     markOnboardingDone()
-    navigate(destination, { replace: true })
-  }
-
-  function handlePrimaryAction() {
-    if (stepIndex < steps.length - 1) {
-      setStepIndex(index => index + 1)
-      return
-    }
-    complete('/create')
+    navigate('/bind', { replace: true })
   }
 
   return (
     <main className="onboarding-page" aria-label="灵偶新手引导">
-      <section className="onboarding-shell" aria-live="polite">
+      <section className="onboarding-shell">
         <img
           className="onboarding-art"
-          src={currentStep.image}
-          alt={currentStep.title}
+          src="/onboarding/onboarding-step-1.png"
+          alt="灵偶和底座"
           draggable={false}
         />
-
-        <button
-          type="button"
-          className="onboarding-hotspot onboarding-hotspot--skip"
-          onClick={() => complete('/home')}
-          aria-label="跳过新手引导"
-        />
-
-        <button
-          type="button"
-          className="onboarding-hotspot onboarding-hotspot--primary"
-          onClick={handlePrimaryAction}
-          aria-label={currentStep.primaryAction}
-        />
-
-        <p className="sr-only">
-          新手引导第 {stepLabel} 步：{currentStep.title}
-        </p>
+        <div className="absolute inset-x-5 bottom-8 rounded-[28px] bg-white/90 p-5 text-center shadow-xl backdrop-blur-xl">
+          <p className="text-[10px] font-bold tracking-[0.18em] text-purple-400">LINGOU</p>
+          <h1 className="mt-2 text-2xl font-black text-purple-950">连接你的灵偶</h1>
+          <p className="mt-2 text-sm leading-6 text-purple-500">
+            绑定底座，创建一个当前角色，然后直接开始交流。
+          </p>
+          <button
+            type="button"
+            onClick={startSetup}
+            className="mt-5 w-full rounded-2xl bg-gradient-to-r from-purple-600 to-pink-500 py-3.5 text-sm font-black text-white"
+          >
+            开始设置
+          </button>
+        </div>
       </section>
     </main>
   )

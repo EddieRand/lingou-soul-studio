@@ -1,0 +1,112 @@
+# Lingou DNESP32S3 reference firmware
+
+This firmware is retained as a future-hardware reference. The adjusted step-11
+MVP uses the portable Linux/macOS carrier described in
+[`docs/portable-device-mvp.md`](../../docs/portable-device-mvp.md); final custom
+hardware requires a separate hardware-engineering acceptance.
+
+| Function | GPIO |
+|---|---|
+| WS2812B ring | 18 |
+| FSR | 16 |
+| INMP441 BCLK / WS / DIN | 5 / 7 / 4 |
+| MAX98357A BCLK / LRC / DOUT | 6 / 15 / 17 |
+
+The device connects directly to `WS(S) /api/asr/device-stream`; no browser,
+serial bridge or development computer participates in a voice turn. The
+backend derives the base, owner and active figure from the `Device` credential.
+It then uses the same voice session, persona, recent history and confirmed
+memory path as H5.
+
+## Provisioning
+
+For a new base, use `scripts/provision_base.py`. New credentials include
+`events:write` and `voice:stream`.
+
+For a base provisioned before device voice support, explicitly rotate its
+credential:
+
+```bash
+cd services/companion-server
+.venv/bin/python -B -m scripts.rotate_device_credential \
+  --base-id BASE-DEVICE-001 \
+  --data-dir /absolute/path/to/runtime-data
+```
+
+The old credential becomes invalid. The new credential is printed once.
+
+Copy `device_config.example.h` to `device_config.h` and fill in Wi-Fi, server
+and credential values. `device_config.h` is ignored by Git. For production WSS,
+set `LINGOU_SERVER_USE_TLS` to `1` and provide the server CA certificate;
+firmware refuses TLS without a CA.
+
+## Build
+
+Required versions used by the step-11 verification:
+
+- ESP32 Arduino core `3.3.10`
+- Adafruit NeoPixel `1.15.5`
+- WebSockets `2.7.2`
+- ArduinoJson `7.4.3`
+
+```bash
+ARDUINO_CLI="/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli"
+"$ARDUINO_CLI" lib install "WebSockets@2.7.2"
+"$ARDUINO_CLI" lib install "ArduinoJson@7.4.3"
+"$ARDUINO_CLI" compile \
+  --fqbn esp32:esp32:esp32s3 \
+  firmware/lingou_device_v1
+```
+
+Select the actual DNESP32S3 serial port when uploading. Do not upload while
+the board is absent or while another serial monitor owns the port.
+
+## Runtime behavior
+
+- Startup flashes red exactly three times, then attempts Wi-Fi and WSS.
+- Microphone sends 20 ms frames of 16 kHz, signed 16-bit little-endian PCM.
+- Backend returns 24 kHz, signed 16-bit little-endian mono PCM in frames no
+  larger than 4096 bytes.
+- Firmware duplicates mono samples to the verified stereo I2S output and sends
+  decoded, playback-started and playback-completed receipts.
+- A heavy FSR press while the character is speaking stops I2S output and
+  cancels the original server turn.
+- During playback the microphone is muted because this hardware revision has
+  no validated acoustic echo cancellation. The heavy press is the reliable
+  interruption mechanism for this MVP.
+- Wi-Fi, server and audio failures use a red/amber ring and local two-tone
+  prompt. Recovery reconnects to a fresh voice session; queued replies are not
+  replayed.
+- When idle, the I2S DMA buffer is zeroed so MAX98357A output remains low.
+
+## Protocol
+
+WebSocket request:
+
+```http
+GET /api/asr/device-stream
+Authorization: Device BASE-DEVICE-001.<secret>
+Sec-WebSocket-Protocol: lingou.device.voice.v1
+```
+
+Binary device-to-server frames are raw microphone PCM. Server-to-device audio
+uses an `audio_chunk` JSON descriptor immediately followed by one binary PCM
+frame. Every descriptor includes `session_id`, `turn_id`, `audio_id`,
+`chunk_index`, `chunk_count`, format and sample-rate fields.
+
+The device sends:
+
+```json
+{"type":"audio_playback","stage":"playback_completed","session_id":"...","turn_id":"...","audio_id":"..."}
+```
+
+Explicit interruption sends:
+
+```json
+{"type":"cancel_turn","session_id":"..."}
+```
+
+The same physical base permits only one live H5 or device voice connection.
+The newer connection replaces the older one with close code `4410`. When H5
+replaces the device, firmware pauses automatic reconnect so it cannot steal the
+session back; a deliberate heavy press resumes device voice after H5 is done.

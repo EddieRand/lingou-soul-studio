@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { apiBases, apiFigures, apiHardware, EventResponse } from '../services/api'
+import { apiBases, apiFigures, apiHardware, type BaseDetail, type EventResponse } from '../services/api'
 import StarField from '../components/StarField'
 import PageHeader from '../components/PageHeader'
 import LiquidGlassPanel from '../components/LiquidGlassPanel'
@@ -31,8 +31,8 @@ const MOOD_LABELS: Record<string, string> = {
 
 export default function HardwareSimPage() {
   const navigate = useNavigate()
-  const [baseId] = useState('BASE-001')
-  const [baseData, setBaseData] = useState<any>(null)
+  const [baseId, setBaseId] = useState<string | null>(null)
+  const [baseData, setBaseData] = useState<BaseDetail | null>(null)
   const [figures, setFigures] = useState<any[]>([])
   const [activeResponse, setActiveResponse] = useState<EventResponse | null>(null)
   const [loading, setLoading] = useState(false)
@@ -44,18 +44,25 @@ export default function HardwareSimPage() {
 
   async function loadData() {
     try {
-      const [baseInfo, figList] = await Promise.all([
-        apiBases.get(baseId).catch(() => null),
-        apiFigures.list().catch(() => []),
-      ])
-      setBaseData(baseInfo)
+      const bases = await apiBases.list()
+      const currentBase = bases[0] || null
+      setBaseData(currentBase)
+      setBaseId(currentBase?.base.base_id || null)
+      if (!currentBase) {
+        setFigures([])
+        return
+      }
+      const figList = await apiFigures.list()
       setFigures(figList)
-    } catch (e) {
-      // ignore
+    } catch {
+      setBaseId(null)
+      setBaseData(null)
+      setFigures([])
     }
   }
 
   async function handleSimulate(eventType: string) {
+    if (!baseId) return
     setLoading(true)
     setError('')
     setActiveResponse(null)
@@ -81,7 +88,7 @@ export default function HardwareSimPage() {
       
       <PageHeader
         title="互动控制台"
-        subtitle={`底座 ${baseId} · 触摸事件模拟`}
+        subtitle={baseId ? `底座 ${baseId} · 触摸事件模拟` : '尚未绑定底座'}
         onBack={() => navigate('/home')}
       />
 
@@ -135,7 +142,10 @@ export default function HardwareSimPage() {
                 {baseData.figure.soul_profile?.archetype} · 交互 {baseData.figure.memory?.interaction_count || 0} 次
               </p>
                   <button
-                    onClick={() => navigate(`/soul/${baseData.figure.figure_id}`)}
+                    onClick={() => {
+                      const figureId = baseData.figure?.figure_id
+                      if (figureId) navigate(`/soul/${figureId}`)
+                    }}
                     className="mt-3 rounded-full bg-white px-4 py-2 text-xs font-black text-purple-950 shadow-lg shadow-black/15"
                   >
                     羁绊主页
@@ -221,10 +231,14 @@ export default function HardwareSimPage() {
                 <button
                   key={fig.figure_id}
                   onClick={async () => {
+                    if (!baseId) return
+                    setError('')
                     try {
                       await apiBases.setActiveFigure(baseId, fig.figure_id)
                       loadData()
-                    } catch {}
+                    } catch (error) {
+                      setError(error instanceof Error ? error.message : '切换灵偶失败，请重试')
+                    }
                   }}
                   className={`soul-switch-chip ${
                     baseData?.figure?.figure_id === fig.figure_id

@@ -4,8 +4,24 @@ services/companion-server/venv/
 __pycache__/
 data/
 services/companion-server/data/
+# Keep the storage implementation while ignoring all runtime data in this directory.
+!services/companion-server/data/
+services/companion-server/data/*
+!services/companion-server/data/store.py
 apps/soul-studio-h5/build/
 apps/soul-studio-h5/dist/
+# Track only the existing static assets referenced by the shipped UI.
+apps/soul-studio-h5/public/*
+!apps/soul-studio-h5/public/login-bg.PNG
+!apps/soul-studio-h5/public/lingou_figure_soul_base_clean.png
+!apps/soul-studio-h5/public/onboarding/
+apps/soul-studio-h5/public/onboarding/*
+!apps/soul-studio-h5/public/onboarding/onboarding-step-1.png
+!apps/soul-studio-h5/public/onboarding/onboarding-step-2.png
+!apps/soul-studio-h5/public/onboarding/onboarding-step-3.png
 .DS_Store
 .env
 *.log
+
+# Per-device Wi-Fi, backend and production credential values.
+firmware/lingou_device_v1/device_config.h

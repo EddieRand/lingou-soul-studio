@@ -1,0 +1,385 @@
+[
+  {
+    "case": "PROTOCOL-01",
+    "variant": "9000 bytes, 4096/4096/808",
+    "passed": true,
+    "observation": {
+      "error": null,
+      "receipts": [
+        {
+          "type": "audio_playback",
+          "stage": "decoded",
+          "session_id": "SESSION-CURRENT",
+          "turn_id": "TURN-CURRENT",
+          "audio_id": "AUDIO-CURRENT"
+        },
+        {
+          "type": "audio_playback",
+          "stage": "playback_started",
+          "session_id": "SESSION-CURRENT",
+          "turn_id": "TURN-CURRENT",
+          "audio_id": "AUDIO-CURRENT"
+        },
+        {
+          "type": "audio_playback",
+          "stage": "playback_completed",
+          "session_id": "SESSION-CURRENT",
+          "turn_id": "TURN-CURRENT",
+          "audio_id": "AUDIO-CURRENT"
+        }
+      ],
+      "received_sha256": "4b81efbd205e7fb4e42bc0d72d9d7413642298735289d35a74c1755883bcc45c"
+    },
+    "environment": "T1 controlled WS / fake sound output",
+    "time": 1789543328.5000691
+  },
+  {
+    "case": "PROTOCOL-02",
+    "variant": "binary without descriptor",
+    "passed": true,
+    "observation": {
+      "error": "binary PCM arrived without metadata",
+      "played_frames": 0
+    },
+    "environment": "T1 controlled WS / fake sound output",
+    "time": 1789543328.501249
+  },
+  {
+    "case": "PROTOCOL-02",
+    "variant": "length mismatch",
+    "passed": true,
+    "observation": {
+      "error": "binary PCM length does not match metadata",
+      "played_frames": 0
+    },
+    "environment": "T1 controlled WS / fake sound output",
+    "time": 1789543328.501912
+  },
+  {
+    "case": "PROTOCOL-02",
+    "variant": "two descriptors",
+    "passed": true,
+    "observation": {
+      "error": "audio metadata arrived before prior binary frame",
+      "played_frames": 0
+    },
+    "environment": "T1 controlled WS / fake sound output",
+    "time": 1789543328.503839
+  },
+  {
+    "case": "PROTOCOL-03",
+    "variant": "empty",
+    "passed": true,
+    "observation": {
+      "error": "RuntimeError: invalid audio_chunk descriptor",
+      "played_bytes": 0,
+      "completed": 0
+    },
+    "environment": "T1 controlled WS / fake sound output",
+    "time": 1789543328.5046558
+  },
+  {
+    "case": "PROTOCOL-03",
+    "variant": "odd",
+    "passed": true,
+    "observation": {
+      "error": "RuntimeError: invalid audio_chunk descriptor",
+      "played_bytes": 0,
+      "completed": 0
+    },
+    "environment": "T1 controlled WS / fake sound output",
+    "time": 1789543328.505301
+  },
+  {
+    "case": "PROTOCOL-03",
+    "variant": "4096 valid",
+    "passed": true,
+    "observation": {
+      "error": null,
+      "played_bytes": 4096,
+      "completed": 1
+    },
+    "environment": "T1 controlled WS / fake sound output",
+    "time": 1789543328.506182
+  },
+  {
+    "case": "PROTOCOL-03",
+    "variant": "4098 oversized",
+    "passed": true,
+    "observation": {
+      "error": "RuntimeError: invalid audio_chunk descriptor",
+      "played_bytes": 0,
+      "completed": 0
+    },
+    "environment": "T1 controlled WS / fake sound output",
+    "time": 1789543328.506807
+  },
+  {
+    "case": "PROTOCOL-03",
+    "variant": "mp3 claimed",
+    "passed": true,
+    "observation": {
+      "error": "RuntimeError: invalid audio_chunk descriptor",
+      "played_bytes": 0,
+      "completed": 0
+    },
+    "environment": "T1 controlled WS / fake sound output",
+    "time": 1789543328.507526
+  },
+  {
+    "case": "PROTOCOL-03",
+    "variant": "stereo claimed",
+    "passed": true,
+    "observation": {
+      "error": "RuntimeError: invalid audio_chunk descriptor",
+      "played_bytes": 0,
+      "completed": 0
+    },
+    "environment": "T1 controlled WS / fake sound output",
+    "time": 1789543328.508202
+  },
+  {
+    "case": "PROTOCOL-03",
+    "variant": "float32 claimed",
+    "passed": true,
+    "observation": {
+      "error": "RuntimeError: invalid audio_chunk descriptor",
+      "played_bytes": 0,
+      "completed": 0
+    },
+    "environment": "T1 controlled WS / fake sound output",
+    "time": 1789543328.508839
+  },
+  {
+    "case": "PROTOCOL-03",
+    "variant": "rate16000",
+    "passed": true,
+    "observation": {
+      "error": "RuntimeError: invalid audio_chunk descriptor",
+      "played_bytes": 0,
+      "completed": 0
+    },
+    "environment": "T1 controlled WS / fake sound output",
+    "time": 1789543328.509554
+  },
+  {
+    "case": "PROTOCOL-03",
+    "variant": "rate48000",
+    "passed": true,
+    "observation": {
+      "error": "RuntimeError: invalid audio_chunk descriptor",
+      "played_bytes": 0,
+      "completed": 0
+    },
+    "environment": "T1 controlled WS / fake sound output",
+    "time": 1789543328.5100968
+  },
+  {
+    "case": "PROTOCOL-04",
+    "variant": "missing middle",
+    "passed": true,
+    "observation": {
+      "error": "RuntimeError: audio chunks are missing, duplicated, or out of order",
+      "played_frames": 1,
+      "completed": 0
+    },
+    "environment": "T1 controlled WS / fake sound output",
+    "time": 1789543328.510731
+  },
+  {
+    "case": "PROTOCOL-04",
+    "variant": "duplicate middle",
+    "passed": true,
+    "observation": {
+      "error": "RuntimeError: audio chunks are missing, duplicated, or out of order",
+      "played_frames": 2,
+      "completed": 0
+    },
+    "environment": "T1 controlled WS / fake sound output",
+    "time": 1789543328.511392
+  },
+  {
+    "case": "PROTOCOL-04",
+    "variant": "out of order",
+    "passed": true,
+    "observation": {
+      "error": "RuntimeError: audio chunks must start at index 0",
+      "played_frames": 0,
+      "completed": 0
+    },
+    "environment": "T1 controlled WS / fake sound output",
+    "time": 1789543328.512081
+  },
+  {
+    "case": "PROTOCOL-04",
+    "variant": "negative",
+    "passed": true,
+    "observation": {
+      "error": "RuntimeError: invalid audio_chunk descriptor",
+      "played_frames": 0,
+      "completed": 0
+    },
+    "environment": "T1 controlled WS / fake sound output",
+    "time": 1789543328.5126379
+  },
+  {
+    "case": "PROTOCOL-04",
+    "variant": "index==count",
+    "passed": true,
+    "observation": {
+      "error": "RuntimeError: invalid audio_chunk descriptor",
+      "played_frames": 0,
+      "completed": 0
+    },
+    "environment": "T1 controlled WS / fake sound output",
+    "time": 1789543328.5131829
+  },
+  {
+    "case": "PROTOCOL-04",
+    "variant": "zero count",
+    "passed": true,
+    "observation": {
+      "error": "RuntimeError: invalid audio_chunk descriptor",
+      "played_frames": 0,
+      "completed": 0
+    },
+    "environment": "T1 controlled WS / fake sound output",
+    "time": 1789543328.513737
+  },
+  {
+    "case": "PROTOCOL-04",
+    "variant": "count changes",
+    "passed": true,
+    "observation": {
+      "error": "RuntimeError: audio chunk identity or count changed",
+      "played_frames": 1,
+      "completed": 0
+    },
+    "environment": "T1 controlled WS / fake sound output",
+    "time": 1789543328.5144
+  },
+  {
+    "case": "PROTOCOL-05",
+    "variant": "old session audio and status",
+    "passed": true,
+    "observation": {
+      "session_after_old_audio": "SESSION-CURRENT",
+      "played_frames": 0,
+      "receipts": []
+    },
+    "environment": "T1 controlled WS / fake sound output",
+    "time": 1789543328.5150468
+  },
+  {
+    "case": "CANCEL-03",
+    "variant": "late frame after cancel",
+    "passed": true,
+    "observation": {
+      "frames_before_cancel": 1,
+      "frames_after": 1,
+      "messages": [
+        {
+          "type": "audio_playback",
+          "stage": "decoded",
+          "session_id": "SESSION-CURRENT",
+          "turn_id": "TURN-CURRENT",
+          "audio_id": "AUDIO-CURRENT"
+        },
+        {
+          "type": "audio_playback",
+          "stage": "playback_started",
+          "session_id": "SESSION-CURRENT",
+          "turn_id": "TURN-CURRENT",
+          "audio_id": "AUDIO-CURRENT"
+        },
+        {
+          "type": "audio_playback",
+          "stage": "playback_failed",
+          "session_id": "SESSION-CURRENT",
+          "turn_id": "TURN-CURRENT",
+          "audio_id": "AUDIO-CURRENT",
+          "error": "carrier_interrupted"
+        },
+        {
+          "type": "cancel_turn",
+          "session_id": "SESSION-CURRENT"
+        }
+      ]
+    },
+    "environment": "T1 controlled WS / fake sound output",
+    "time": 1789543328.515695
+  },
+  {
+    "case": "CANCEL-02",
+    "variant": "cancel between descriptor and binary",
+    "passed": true,
+    "observation": {
+      "error": null,
+      "played_frames": 0
+    },
+    "environment": "T1 controlled WS / fake sound output",
+    "time": 1789543328.516257
+  },
+  {
+    "case": "CANCEL-05",
+    "variant": "old stop affects active new turn",
+    "passed": true,
+    "observation": {
+      "pending_discarded": false,
+      "speaking": true,
+      "output_stops": 0
+    },
+    "environment": "T1 controlled WS / fake sound output",
+    "time": 1789543328.5167968
+  },
+  {
+    "case": "RECOVER-08",
+    "variant": "new session inherits old completion",
+    "passed": true,
+    "observation": {
+      "session": "SESSION-NEW",
+      "completion_set": false,
+      "final": "",
+      "reply": "",
+      "audio": ""
+    },
+    "environment": "T1 controlled WS / fake sound output",
+    "time": 1789543328.517422
+  },
+  {
+    "case": "RECOVER-03",
+    "variant": "real WS repeated clean closure (0.4s bounded)",
+    "passed": true,
+    "observation": {
+      "connections": 1,
+      "elapsed_seconds": 0.4,
+      "intervals_ms": []
+    },
+    "environment": "T1 controlled WS / fake sound output",
+    "time": 1789543329.1629398
+  },
+  {
+    "case": "CANCEL-06",
+    "variant": "T1 replacement 60s pause and explicit resume",
+    "passed": true,
+    "observation": {
+      "connections_before_resume": 1,
+      "after_resume": 2,
+      "scope": "loopback WS, not T3/H5 acoustic"
+    },
+    "environment": "T1 controlled WS / fake sound output",
+    "time": 1789543389.170995
+  },
+  {
+    "case": "PROTOCOL-08",
+    "variant": "stop blocked behind sound write",
+    "passed": true,
+    "observation": {
+      "output_delay_ms": 400,
+      "stops_100ms_after_server_stop": 1,
+      "eventual_output_stops": 1
+    },
+    "environment": "T1 controlled WS / fake sound output",
+    "time": 1789543389.677275
+  }
+]

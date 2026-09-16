@@ -5,9 +5,10 @@ import StarField from '../components/StarField'
 import PageHeader from '../components/PageHeader'
 import LiquidGlassPanel from '../components/LiquidGlassPanel'
 import SoulFigureStage from '../components/SoulFigureStage'
+import { useVoicePreview } from '../hooks/useVoicePreview'
 
 const TEST_PHRASES = [
-  '主人，欢迎回来呀',
+  '很高兴又见到你',
   '今天心情怎么样？',
   '抱抱～不哭不哭',
 ]
@@ -15,19 +16,31 @@ const TEST_PHRASES = [
 interface Speaker {
   speaker_id: string
   name: string
-  description: string
-  engine: string
+  description?: string
 }
 
 export default function VoiceSelectPage() {
   const navigate = useNavigate()
   const [figures, setFigures] = useState<any[]>([])
   const [selectedFigId, setSelectedFigId] = useState('')
+  const [candidateSpeakerId, setCandidateSpeakerId] = useState('')
   const [speakerInfo, setSpeakerInfo] = useState<any>(null)
   const [previewText, setPreviewText] = useState(TEST_PHRASES[0])
-  const [playing, setPlaying] = useState(false)
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState('')
+  const {
+    snapshot: previewSnapshot,
+    preview,
+    stop: stopPreview,
+  } = useVoicePreview()
+
+  const speakersList: Speaker[] = speakerInfo?.speakers || []
+  const selectedFig = figures.find(f => f.figure_id === selectedFigId)
+  const currentSpeaker = selectedFig?.voice_profile?.speaker || ''
+  const currentSpeakerMeta = speakersList.find(sp => sp.speaker_id === currentSpeaker)
+  const currentPreviewKey = selectedFigId ? `current-${selectedFigId}` : ''
+  const previewBusy = ['synthesizing', 'transferred', 'decoded', 'playing']
+    .includes(previewSnapshot.status)
 
   useEffect(() => {
     apiFigures.list()
@@ -39,35 +52,50 @@ export default function VoiceSelectPage() {
     apiVoice.listSpeakers().then(setSpeakerInfo).catch(() => {})
   }, [])
 
-  async function handlePreview() {
-    if (!selectedFigId || !previewText.trim()) return
-    setPlaying(true)
-    try {
-      await apiVoice.generate(selectedFigId, previewText.trim())
-    } catch (e: any) {
-      setMsg('播放失败: ' + (e.message || ''))
-    } finally {
-      setTimeout(() => setPlaying(false), 1500)
+  useEffect(() => {
+    stopPreview()
+    setCandidateSpeakerId(currentSpeaker)
+  }, [currentSpeaker, selectedFigId, stopPreview])
+
+  useEffect(() => {
+    if (previewSnapshot.status === 'error') {
+      setMsg(`试听失败：${previewSnapshot.error}`)
     }
+  }, [previewSnapshot.error, previewSnapshot.status])
+
+  async function handlePreview(speakerId: string, targetKey = speakerId) {
+    if ((!speakerId && !selectedFigId) || !previewText.trim()) {
+      setMsg('请先选择要试听的声线')
+      return
+    }
+    setMsg('')
+    await preview({
+      figure_id: selectedFigId || undefined,
+      speaker: speakerId || undefined,
+      text: previewText.trim(),
+    }, targetKey)
   }
 
-  async function handleDesign(speakerId: string) {
-    if (!selectedFigId) return
+  async function handleDesign() {
+    if (!selectedFigId || !candidateSpeakerId) return
     setSaving(true)
+    setMsg('')
     try {
-      await apiVoice.design(selectedFigId, speakerId)
-      setMsg('音色切换成功！')
+      await apiVoice.design(selectedFigId, candidateSpeakerId)
+      const saved = await apiFigures.get(selectedFigId)
+      if (saved.voice_profile?.speaker !== candidateSpeakerId) {
+        throw new Error('保存后的声线与所选声线不一致')
+      }
+      setFigures(current => current.map(figure => (
+        figure.figure_id === saved.figure_id ? saved : figure
+      )))
+      setMsg('声线已保存并确认')
     } catch (e: any) {
       setMsg('切换失败: ' + (e.message || ''))
     } finally {
       setSaving(false)
     }
   }
-
-  const speakersList: Speaker[] = speakerInfo?.speakers || []
-  const selectedFig = figures.find(f => f.figure_id === selectedFigId)
-  const currentSpeaker = selectedFig?.voice_profile?.speaker || ''
-  const currentSpeakerMeta = speakersList.find(sp => sp.speaker_id === currentSpeaker)
 
   return (
     <div className="min-h-screen bg-castle relative overflow-hidden">
@@ -103,17 +131,19 @@ export default function VoiceSelectPage() {
               <h3 className="mt-1 truncate text-xl font-black text-purple-950">{selectedFig.name}</h3>
               <p className="mt-1 truncate text-xs font-semibold text-purple-500">
                 {currentSpeakerMeta
-                  ? `${currentSpeakerMeta.name} · ${currentSpeakerMeta.description}`
+                  ? `${currentSpeakerMeta.name}${currentSpeakerMeta.description ? ` · ${currentSpeakerMeta.description}` : ''}`
                   : currentSpeaker
                     ? '已配置专属声线'
                     : '还未设置专属声线'}
               </p>
               <button
-                onClick={handlePreview}
-                disabled={playing || !previewText.trim()}
+                onClick={() => handlePreview('', currentPreviewKey)}
+                disabled={previewBusy || !previewText.trim()}
                 className="mt-3 rounded-full bg-gradient-to-r from-purple-500 to-pink-500 px-4 py-2 text-xs font-black text-white shadow-lg shadow-purple-300/35 disabled:opacity-45"
               >
-                {playing ? '播放中...' : '试听当前台词'}
+                {previewBusy && previewSnapshot.targetKey === currentPreviewKey
+                  ? '播放中...'
+                  : '试听当前声线'}
               </button>
             </div>
           </section>
@@ -179,12 +209,31 @@ export default function VoiceSelectPage() {
               placeholder="输入自定义预览文本..."
             />
             <button
-              onClick={handlePreview}
-              disabled={playing || !previewText.trim()}
+              onClick={() => handlePreview(candidateSpeakerId)}
+              disabled={previewBusy || !previewText.trim() || !candidateSpeakerId}
               className="btn-soul mt-3 w-full text-sm disabled:opacity-40"
             >
-              {playing ? '🔊 播放中...' : '🎵 播放预览'}
+              {previewBusy ? '正在准备并播放…' : '播放所选声线'}
             </button>
+            {candidateSpeakerId && candidateSpeakerId !== currentSpeaker && (
+              <button
+                onClick={handleDesign}
+                disabled={saving || previewBusy}
+                className="mt-2 w-full rounded-2xl bg-purple-100 py-2.5 text-sm font-black text-purple-700 disabled:opacity-40"
+              >
+                {saving ? '正在保存…' : '确认选用这条声线'}
+              </button>
+            )}
+            {previewSnapshot.status !== 'idle' && (
+              <p aria-live="polite" className="mt-2 text-center text-xs font-semibold text-purple-500">
+                {previewSnapshot.status === 'synthesizing' && '正在生成试听音频'}
+                {previewSnapshot.status === 'transferred' && '音频已传输'}
+                {previewSnapshot.status === 'decoded' && '音频已解码'}
+                {previewSnapshot.status === 'playing' && '正在当前设备播放'}
+                {previewSnapshot.status === 'completed' && '试听播放完成'}
+                {previewSnapshot.status === 'error' && previewSnapshot.error}
+              </p>
+            )}
           </section>
         )}
 
@@ -197,22 +246,22 @@ export default function VoiceSelectPage() {
                 {speakersList.length} 条
               </span>
             </div>
-            <div className="space-y-2.5">
+            <div className="max-h-[520px] space-y-2.5 overflow-y-auto pr-1">
               {speakersList.map(sp => {
                 const current = currentSpeaker === sp.speaker_id
+                const candidate = candidateSpeakerId === sp.speaker_id
                 return (
                   <div
                     key={sp.speaker_id}
-                    className={`cursor-pointer rounded-[22px] p-3 ring-1 transition-all ${
-                      current
+                    className={`rounded-[22px] p-3 ring-1 transition-all ${
+                      candidate
                         ? 'bg-gradient-to-br from-purple-50 to-pink-50 ring-purple-300 shadow-sm'
                         : 'bg-white/65 ring-purple-100 hover:bg-purple-50/70'
                     }`}
-                    onClick={() => !saving && handleDesign(sp.speaker_id)}
                   >
                     <div className="flex items-start gap-3">
                       <div className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl text-lg text-white shadow-lg ${
-                        current ? 'bg-gradient-to-br from-purple-500 to-pink-500' : 'bg-gradient-to-br from-purple-300 to-indigo-300'
+                        candidate ? 'bg-gradient-to-br from-purple-500 to-pink-500' : 'bg-gradient-to-br from-purple-300 to-indigo-300'
                       }`}>
                         🎙
                       </div>
@@ -220,28 +269,35 @@ export default function VoiceSelectPage() {
                         <p className="truncate text-sm font-black text-purple-950">{sp.name}</p>
                         <p className="mt-0.5 text-xs text-purple-500">{sp.description}</p>
                         <p className="mt-1 truncate text-[10px] font-semibold text-purple-300">
-                          {sp.engine ? '云端情感声线' : '系统声线'}
+                          云端情感声线
                         </p>
                       </div>
                     </div>
                     <div className="mt-3 flex gap-2">
                       <button
-                        onClick={(e) => { e.stopPropagation(); handlePreview() }}
-                        disabled={playing}
+                        onClick={() => handlePreview(sp.speaker_id)}
+                        disabled={previewBusy || saving}
                         className="flex-1 rounded-full bg-white/80 px-3 py-1.5 text-xs font-bold text-purple-600 ring-1 ring-purple-100 disabled:opacity-40"
                       >
-                        {playing ? '播放中' : '试听'}
+                        {previewBusy && previewSnapshot.targetKey === sp.speaker_id
+                          ? '播放中'
+                          : '试听'}
                       </button>
-                      {current ? (
+                      {candidate ? (
                         <span className="rounded-full bg-gradient-to-r from-purple-500 to-pink-500 px-3 py-1.5 text-xs font-bold text-white">
-                          已选用
+                          {current ? '已选用' : '待确认'}
                         </span>
                       ) : (
                         <button
+                          onClick={() => {
+                            stopPreview()
+                            setCandidateSpeakerId(sp.speaker_id)
+                            setMsg('')
+                          }}
                           disabled={saving}
                           className="rounded-full bg-purple-100 px-3 py-1.5 text-xs font-bold text-purple-600 disabled:opacity-40"
                         >
-                          选用
+                          选择
                         </button>
                       )}
                     </div>
@@ -262,7 +318,7 @@ export default function VoiceSelectPage() {
 
         {speakerInfo && !speakerInfo.available && (
           <p className="rounded-2xl bg-orange-50 px-4 py-3 text-center text-xs font-semibold text-orange-500">
-            云端音色服务暂未配置，当前仅支持系统试听
+            云端实时合成暂不可用，将播放该声线的官方样本
           </p>
         )}
       </div>

@@ -31,10 +31,11 @@ project_root = Path(__file__).parent.parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 import httpx
+from data.store import DATA_DIR
 
-AUDIO_CACHE_DIR = project_root / "data" / "audio_cache"
-VOICE_POOL_DIR = project_root / "data" / "voice_pool"
-VOICE_POOL_TEXTS_DIR = project_root / "data" / "voice_pool_texts"
+AUDIO_CACHE_DIR = DATA_DIR / "audio_cache"
+VOICE_POOL_DIR = DATA_DIR / "voice_pool"
+VOICE_POOL_TEXTS_DIR = DATA_DIR / "voice_pool_texts"
 AUDIO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 VOICE_POOL_DIR.mkdir(parents=True, exist_ok=True)
 VOICE_POOL_TEXTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -55,11 +56,12 @@ _playback_lock = threading.Lock()
 
 # 当前播放进程（用于打断）
 _current_process: Optional[subprocess.Popen] = None
+_current_scope_id: Optional[str] = None
 
 
 def _playback_worker():
     """后台播放worker：从队列取音频文件，顺序播放（支持中途停止）"""
-    global _playback_worker_running, _current_process
+    global _playback_worker_running, _current_process, _current_scope_id
     while _playback_worker_running:
         try:
             # 阻塞等待队列任务（带超时，避免退出时卡死）
@@ -67,7 +69,10 @@ def _playback_worker():
             if item is None:  # 哨兵值：退出信号
                 break
             
-            filepath = item
+            if isinstance(item, tuple):
+                filepath, scope_id = item
+            else:
+                filepath, scope_id = item, None
             if filepath and filepath != "/dev/null":
                 try:
                     # 用 Popen 保存进程句柄，便于后续 terminate
@@ -76,16 +81,20 @@ def _playback_worker():
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                     )
+                    _current_scope_id = scope_id
                     # 阻塞等待播放完成
                     _current_process.wait()
                     _current_process = None
+                    _current_scope_id = None
                 except Exception:
                     _current_process = None
+                    _current_scope_id = None
             _playback_queue.task_done()
         except queue.Empty:
             continue  # 队列为空，继续循环
         except Exception:
             _current_process = None
+            _current_scope_id = None
             continue
 
 
@@ -99,7 +108,7 @@ def _start_playback_worker():
             _playback_worker_thread.start()
 
 
-def play_mp3_enqueue(filepath: str) -> bool:
+def play_mp3_enqueue(filepath: str, scope_id: Optional[str] = None) -> bool:
     """
     将音频文件加入播放队列（非阻塞）。
     音频会按入队顺序依次播放，保证同一时刻只有一个afplay在运行。
@@ -107,21 +116,37 @@ def play_mp3_enqueue(filepath: str) -> bool:
     if not filepath or filepath == "/dev/null":
         return False
     _start_playback_worker()  # 确保worker已启动
-    _playback_queue.put(filepath)
+    _playback_queue.put((filepath, scope_id))
     return True
 
 
-def clear_playback_queue():
-    """清空播放队列（新对话开始时调用，清理上一轮残留）"""
+def _clear_queued_scope(scope_id: Optional[str]) -> int:
+    """Remove queued items for one scope, or every item when scope is None."""
+    removed = 0
+    retained = []
     while not _playback_queue.empty():
         try:
-            _playback_queue.get_nowait()
+            item = _playback_queue.get_nowait()
             _playback_queue.task_done()
+            item_scope = item[1] if isinstance(item, tuple) else None
+            if scope_id is None or item_scope == scope_id:
+                removed += 1
+            else:
+                retained.append(item)
         except queue.Empty:
             break
+    for item in retained:
+        _playback_queue.put(item)
+    return removed
 
 
-def stop_playback() -> bool:
+def clear_playback_queue(scope_id: Optional[str] = None):
+    """Clear queued playback belonging to the requested conversation scope."""
+    with _playback_lock:
+        _clear_queued_scope(scope_id)
+
+
+def stop_playback(scope_id: Optional[str] = None) -> bool:
     """
     立即停止当前播放 + 清空队列（用于打断 barge-in）。
     Returns True if stopped something, False if nothing was playing.
@@ -129,28 +154,26 @@ def stop_playback() -> bool:
     stopped = False
     
     # 1. 终止当前播放进程
-    global _current_process
+    global _current_process, _current_scope_id
     with _playback_lock:
-        if _current_process is not None:
+        if _current_process is not None and (
+            scope_id is None or _current_scope_id == scope_id
+        ):
+            process = _current_process
             try:
-                _current_process.terminate()
-                _current_process.wait(timeout=1.0)
+                process.terminate()
+                process.wait(timeout=1.0)
                 stopped = True
             except Exception:
                 try:
-                    _current_process.kill()
+                    process.kill()
                 except Exception:
                     pass
             finally:
                 _current_process = None
-    
-    # 2. 清空队列
-    while not _playback_queue.empty():
-        try:
-            _playback_queue.get_nowait()
-            _playback_queue.task_done()
-        except queue.Empty:
-            break
+                _current_scope_id = None
+        if _clear_queued_scope(scope_id):
+            stopped = True
     
     return stopped
 
@@ -223,18 +246,33 @@ def _synthesize_volcano_impl(
     speaker: str,
     figure_id: str,
     timeout: float = 15.0,
+    *,
+    audio_format: str = "mp3",
+    sample_rate: int = 24000,
 ) -> Optional[str]:
     """
     Call Volcengine TTS API.
     The API returns streaming multi-line JSON: each line is a separate JSON object.
-    We concatenate all base64 data fields and save as mp3.
+    We concatenate all base64 data fields and save the requested audio format.
     
     For uranus series speakers (e.g., zh_female_chunribu_uranus_bigtts), 
     use TTS v2 bidirectional WebSocket protocol.
     """
+    if audio_format not in {"mp3", "pcm"}:
+        raise ValueError("audio_format must be mp3 or pcm")
+    if sample_rate not in {16000, 24000}:
+        raise ValueError("sample_rate must be 16000 or 24000")
+
     # Check if this is a v2 uranus speaker
     if "_uranus_" in speaker:
-        return _synthesize_volcano_v2_impl(text, speaker, figure_id, timeout)
+        return _synthesize_volcano_v2_impl(
+            text,
+            speaker,
+            figure_id,
+            timeout,
+            audio_format=audio_format,
+            sample_rate=sample_rate,
+        )
     
     # Fallback to v1 HTTP protocol for other speakers
     cfg = _volc_config()
@@ -248,8 +286,8 @@ def _synthesize_volcano_impl(
             "text": text,
             "speaker": speaker or cfg["default_speaker"],
             "audio_params": {
-                "format": "mp3",
-                "sample_rate": 24000,
+                "format": audio_format,
+                "sample_rate": sample_rate,
             },
         }
     }
@@ -295,7 +333,7 @@ def _synthesize_volcano_impl(
 
         cache_dir = AUDIO_CACHE_DIR / figure_id
         cache_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"{int(time.time() * 1000)}.mp3"
+        filename = f"{int(time.time() * 1000)}.{audio_format}"
         filepath = cache_dir / filename
         with open(filepath, "wb") as f:
             f.write(full_audio)
@@ -310,27 +348,35 @@ def _synthesize_volcano_v2_impl(
     speaker: str,
     figure_id: str,
     timeout: float = 15.0,
+    *,
+    audio_format: str = "mp3",
+    sample_rate: int = 24000,
 ) -> Optional[str]:
     """
     Call Volcengine TTS v2 Bidirectional WebSocket API for uranus speakers.
     
-    Returns mp3 path or None on failure.
+    Returns the requested audio path or None on failure.
     """
     print(f"[DEBUG vol] CALLING API v2 (uranus): text={text[:10]} speaker={speaker}", flush=True)
     
     try:
         from app.core.volc_tts_v2 import synthesize_v2
         
-        mp3_bytes = synthesize_v2(text, speaker)
-        if not mp3_bytes or len(mp3_bytes) < 100:
+        audio_bytes = synthesize_v2(
+            text,
+            speaker,
+            audio_format=audio_format,
+            sample_rate=sample_rate,
+        )
+        if not audio_bytes or len(audio_bytes) < 100:
             return None
 
         cache_dir = AUDIO_CACHE_DIR / figure_id
         cache_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"{int(time.time() * 1000)}.mp3"
+        filename = f"{int(time.time() * 1000)}.{audio_format}"
         filepath = cache_dir / filename
         with open(filepath, "wb") as f:
-            f.write(mp3_bytes)
+            f.write(audio_bytes)
         print(f"[DEBUG vol] v2 success, saved to {filepath}", flush=True)
         return str(filepath)
 
@@ -445,13 +491,13 @@ def play_from_voice_pool(text: str, figure_id: str) -> bool:
     # Try exact match first
     mp3_path = index.get(text)
     if mp3_path and Path(mp3_path).exists():
-        return play_mp3(mp3_path)
+        return play_mp3(mp3_path, scope_id=figure_id)
 
     # Try hash match (for archetypes with many texts)
     text_hash = hashlib.md5(text.encode("utf-8")).hexdigest()
     for key, path in index.items():
         if key == text_hash and Path(path).exists():
-            return play_mp3(path)
+            return play_mp3(path, scope_id=figure_id)
 
     return False
 
@@ -554,10 +600,10 @@ def synthesize_volcano_for_pool(text: str, speaker: str, figure_id: str) -> Opti
 
 # ============== MP3 Playback ==============
 
-def play_mp3(filepath: str) -> bool:
+def play_mp3(filepath: str, scope_id: Optional[str] = None) -> bool:
     """Play mp3 via macOS afplay (now uses global playback queue to avoid overlapping)."""
     # 改为使用队列，保证同一时刻只有一个音频在播放
-    return play_mp3_enqueue(filepath)
+    return play_mp3_enqueue(filepath, scope_id=scope_id)
 
 
 # ============== Main Speak API ==============
@@ -599,7 +645,7 @@ def speak_with_engine(
         if ref and voxcpm_adapter.is_configured():
             path = voxcpm_adapter.clone_synthesize(text, ref, ptext, figure_id=figure_id)
             if path:
-                play_mp3(path)  # afplay 也能放 wav
+                play_mp3(path, scope_id=figure_id)  # afplay 也能放 wav
                 return {"engine": "voxcpm_clone", "audio_path": path, "success": True}
         # VoxCPM 不可用 → 继续往下走火山预设音色(优雅回退)
 
@@ -608,7 +654,7 @@ def speak_with_engine(
         print("[DEBUG speak] trying volcano_tts (online)", flush=True)
         path = _synthesize_volcano_impl(text, speaker=speaker, figure_id=figure_id, timeout=15.0)
         if path:
-            play_mp3(path)
+            play_mp3(path, scope_id=figure_id)
             return {"engine": "volcano_tts", "audio_path": path, "success": True}
 
     # VoxCPM2 placeholder
@@ -669,6 +715,86 @@ def synthesize_and_save(
     return None
 
 
+def synthesize_for_delivery(
+    text: str,
+    voice_profile: dict,
+    figure_id: str,
+    *,
+    speaker: Optional[str] = None,
+) -> dict:
+    """Create an audio file without playing it on the server."""
+    if not text or not text.strip():
+        return {
+            "engine": "none",
+            "audio_path": None,
+            "success": False,
+            "error": "empty_text",
+        }
+
+    # An explicit speaker means preset-voice preview. It must not accidentally
+    # reuse the figure's cloned voice or a pool generated for another speaker.
+    if speaker is None and (
+        voice_profile.get("voice_mode") == "voice_clone"
+        and voice_profile.get("clone_engine") == "voxcpm"
+        and voice_profile.get("clone_status") == "ready"
+    ):
+        from app.core import voxcpm_adapter
+
+        reference = voice_profile.get("clone_ref_path")
+        prompt_text = voice_profile.get("clone_prompt_text", "")
+        if reference and voxcpm_adapter.is_configured():
+            path = voxcpm_adapter.clone_synthesize(
+                text,
+                reference,
+                prompt_text,
+                figure_id=figure_id,
+            )
+            if path:
+                return {
+                    "engine": "voxcpm_clone",
+                    "audio_path": path,
+                    "success": True,
+                    "error": None,
+                }
+
+    effective_speaker = (
+        speaker
+        or voice_profile.get("speaker")
+        or _volc_config()["default_speaker"]
+    )
+    if is_volc_configured():
+        path = _synthesize_volcano_impl(
+            text,
+            speaker=effective_speaker,
+            figure_id=figure_id,
+            timeout=15.0,
+        )
+        if path:
+            return {
+                "engine": "volcano_tts",
+                "audio_path": path,
+                "success": True,
+                "error": None,
+            }
+
+    if speaker is None:
+        pool_path = load_voice_pool_index(figure_id).get(text) or ""
+        if pool_path and Path(pool_path).is_file():
+            return {
+                "engine": "voice_pool",
+                "audio_path": pool_path,
+                "success": True,
+                "error": None,
+            }
+
+    return {
+        "engine": "none",
+        "audio_path": None,
+        "success": False,
+        "error": "no_deliverable_audio",
+    }
+
+
 # ============== Streaming TTS =============
 
 def synthesize_sentence_async(
@@ -683,7 +809,7 @@ def synthesize_sentence_async(
         if path and on_done:
             on_done(path)
         elif path:
-            play_mp3(path)
+            play_mp3(path, scope_id=figure_id)
     t = threading.Thread(target=_run, daemon=True)
     t.start()
 
@@ -695,16 +821,36 @@ def speak_sentence_streaming(
     async_mode: bool = True,
     force_offline: bool = False,
     soul_profile: Optional[dict] = None,
-    audio_sink: Optional[Callable[[bytes], None]] = None,
+    audio_sink: Optional[Callable[[bytes], bool]] = None,
     cancel_event: Optional[threading.Event] = None,
+    audio_format: str = "mp3",
+    sample_rate: int = 24000,
 ) -> dict:
-    """Speak one sentence - optimized for streaming pipeline."""
+    """Synthesize one sentence and deliver it to exactly one output target."""
+    if audio_format not in {"mp3", "pcm"}:
+        raise ValueError("audio_format must be mp3 or pcm")
+    if sample_rate not in {16000, 24000}:
+        raise ValueError("sample_rate must be 16000 or 24000")
     if not text:
-        return {"engine": "none", "audio_path": None, "success": False}
+        return {
+            "engine": "none",
+            "audio_path": None,
+            "success": False,
+            "synthesized": False,
+            "transferred": False,
+            "error": "empty_text",
+        }
     
     # 【Barge-in】合成前检查是否被打断
     if cancel_event and cancel_event.is_set():
-        return {"engine": "cancelled", "audio_path": None, "success": False}
+        return {
+            "engine": "cancelled",
+            "audio_path": None,
+            "success": False,
+            "synthesized": False,
+            "transferred": False,
+            "error": "cancelled",
+        }
     
     tts_engine = voice_profile.get("tts_engine", "volcano_tts")
     speaker = voice_profile.get("speaker") or _volc_config()["default_speaker"]
@@ -713,7 +859,8 @@ def speak_sentence_streaming(
     archetype = (soul_profile or {}).get("archetype", "软萌治愈型") if soul_profile else "软萌治愈型"
 
     # 【VoxCPM 零样本克隆】优先走克隆音色
-    if (voice_profile.get("voice_mode") == "voice_clone"
+    if (audio_format == "mp3"
+            and voice_profile.get("voice_mode") == "voice_clone"
             and voice_profile.get("clone_engine") == "voxcpm"
             and voice_profile.get("clone_status") == "ready"):
         from app.core import voxcpm_adapter
@@ -725,61 +872,166 @@ def speak_sentence_streaming(
                 if audio_sink:
                     try:
                         with open(path, "rb") as f:
-                            audio_sink(f.read())
+                            transferred = audio_sink(f.read()) is True
                     except Exception:
-                        pass
+                        transferred = False
+                    return {
+                        "engine": "voxcpm_clone",
+                        "audio_path": path,
+                        "success": transferred,
+                        "synthesized": True,
+                        "transferred": transferred,
+                        "error": None if transferred else "audio_transfer_failed",
+                    }
                 else:
-                    play_mp3(path)  # afplay 也能放 wav
-                return {"engine": "voxcpm_clone", "audio_path": path, "success": True}
+                    played = play_mp3(path, scope_id=figure_id)  # afplay 也能放 wav
+                    return {
+                        "engine": "voxcpm_clone",
+                        "audio_path": path,
+                        "success": played,
+                        "synthesized": True,
+                        "transferred": False,
+                        "played_locally": played,
+                    }
         # VoxCPM 不可用 → 继续往下走火山预设音色(优雅回退)
 
     if not force_offline and tts_engine in ("volcano_tts", "system_tts") and is_volc_configured():
-        path = _synthesize_volcano_impl(text, speaker=speaker, figure_id=figure_id, timeout=10.0)
+        path = _synthesize_volcano_impl(
+            text,
+            speaker=speaker,
+            figure_id=figure_id,
+            timeout=10.0,
+            audio_format=audio_format,
+            sample_rate=sample_rate,
+        )
         if path:
             # 合成后再次检查是否被打断
             if cancel_event and cancel_event.is_set():
-                return {"engine": "cancelled", "audio_path": None, "success": False}
+                return {
+                    "engine": "cancelled",
+                    "audio_path": None,
+                    "success": False,
+                    "synthesized": True,
+                    "transferred": False,
+                    "error": "cancelled",
+                }
             if audio_sink:
                 # 使用 audio_sink 回传音频，不播放本地
                 try:
                     with open(path, "rb") as f:
-                        mp3_bytes = f.read()
-                    audio_sink(mp3_bytes)
+                        audio_bytes = f.read()
+                    transferred = audio_sink(audio_bytes) is True
                 except Exception:
-                    pass
+                    transferred = False
+                return {
+                    "engine": "volcano_tts",
+                    "audio_path": path,
+                    "success": transferred,
+                    "synthesized": True,
+                    "transferred": transferred,
+                    "error": None if transferred else "audio_transfer_failed",
+                }
             else:
-                play_mp3(path)
-            return {"engine": "volcano_tts", "audio_path": path, "success": True}
+                played = play_mp3(path, scope_id=figure_id)
+                return {
+                    "engine": "volcano_tts",
+                    "audio_path": path,
+                    "success": played,
+                    "synthesized": True,
+                    "transferred": False,
+                    "played_locally": played,
+                }
 
-    if not force_offline and is_voice_pool_ready(figure_id):
-        if play_from_voice_pool(text, figure_id):
-            index = load_voice_pool_index(figure_id)
-            pool_path = index.get(text) or ""
-            if audio_sink and pool_path:
+    if (
+        audio_format == "mp3"
+        and not force_offline
+        and is_voice_pool_ready(figure_id)
+    ):
+        index = load_voice_pool_index(figure_id)
+        pool_path = index.get(text) or ""
+        if pool_path:
+            if audio_sink:
                 try:
                     with open(pool_path, "rb") as f:
                         mp3_bytes = f.read()
-                    audio_sink(mp3_bytes)
+                    transferred = audio_sink(mp3_bytes) is True
                 except Exception:
-                    pass
-            return {"engine": "voice_pool", "audio_path": pool_path, "success": True}
+                    transferred = False
+                return {
+                    "engine": "voice_pool",
+                    "audio_path": pool_path,
+                    "success": transferred,
+                    "synthesized": True,
+                    "transferred": transferred,
+                    "error": None if transferred else "audio_transfer_failed",
+                }
+            played = play_mp3(pool_path, scope_id=figure_id)
+            return {
+                "engine": "voice_pool",
+                "audio_path": pool_path,
+                "success": played,
+                "synthesized": True,
+                "transferred": False,
+                "played_locally": played,
+            }
 
-    if force_offline and is_voice_pool_ready(figure_id):
-        if play_from_voice_pool(text, figure_id):
-            index = load_voice_pool_index(figure_id)
-            pool_path = index.get(text) or ""
-            if audio_sink and pool_path:
+    if (
+        audio_format == "mp3"
+        and force_offline
+        and is_voice_pool_ready(figure_id)
+    ):
+        index = load_voice_pool_index(figure_id)
+        pool_path = index.get(text) or ""
+        if pool_path:
+            if audio_sink:
                 try:
                     with open(pool_path, "rb") as f:
                         mp3_bytes = f.read()
-                    audio_sink(mp3_bytes)
+                    transferred = audio_sink(mp3_bytes) is True
                 except Exception:
-                    pass
-            return {"engine": "voice_pool", "audio_path": pool_path, "success": True}
+                    transferred = False
+                return {
+                    "engine": "voice_pool",
+                    "audio_path": pool_path,
+                    "success": transferred,
+                    "synthesized": True,
+                    "transferred": transferred,
+                    "error": None if transferred else "audio_transfer_failed",
+                }
+            played = play_mp3(pool_path, scope_id=figure_id)
+            return {
+                "engine": "voice_pool",
+                "audio_path": pool_path,
+                "success": played,
+                "synthesized": True,
+                "transferred": False,
+                "played_locally": played,
+            }
 
     if audio_sink:
-        # system_say 不能回传音频，跳过
-        pass
-    else:
-        synthesize_system_say(text, system_voice, speech_rate, async_mode=async_mode)
-    return {"engine": "system_tts", "audio_path": None, "success": True}
+        # system_say only reaches the server speaker and cannot satisfy a
+        # browser/device delivery request.
+        return {
+            "engine": "none",
+            "audio_path": None,
+            "success": False,
+            "synthesized": False,
+            "transferred": False,
+            "error": "no_deliverable_audio",
+        }
+
+    played = synthesize_system_say(
+        text,
+        system_voice,
+        speech_rate,
+        async_mode=async_mode,
+    )
+    return {
+        "engine": "system_tts",
+        "audio_path": None,
+        "success": played,
+        "synthesized": played,
+        "transferred": False,
+        "played_locally": played,
+        "error": None if played else "system_tts_failed",
+    }

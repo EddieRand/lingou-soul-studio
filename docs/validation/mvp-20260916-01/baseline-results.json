@@ -1,0 +1,199 @@
+[
+  {
+    "name": "test_audio_delivery",
+    "returncode": 0,
+    "evidence": "baseline-test_audio_delivery.log",
+    "command": [
+      "/Users/bytedance/Documents/Codex/2026-09-08/du/work/step-01/runtime-venv/bin/python",
+      "-B",
+      "tests/test_audio_delivery.py",
+      "-v"
+    ]
+  },
+  {
+    "name": "test_auth_security",
+    "returncode": 0,
+    "evidence": "baseline-test_auth_security.log",
+    "command": [
+      "/Users/bytedance/Documents/Codex/2026-09-08/du/work/step-01/runtime-venv/bin/python",
+      "-B",
+      "tests/test_auth_security.py",
+      "-v"
+    ]
+  },
+  {
+    "name": "test_baseline",
+    "returncode": 0,
+    "evidence": "baseline-test_baseline.log",
+    "command": [
+      "/Users/bytedance/Documents/Codex/2026-09-08/du/work/step-01/runtime-venv/bin/python",
+      "-B",
+      "tests/test_baseline.py",
+      "-v"
+    ]
+  },
+  {
+    "name": "test_data_ownership",
+    "returncode": 0,
+    "evidence": "baseline-test_data_ownership.log",
+    "command": [
+      "/Users/bytedance/Documents/Codex/2026-09-08/du/work/step-01/runtime-venv/bin/python",
+      "-B",
+      "tests/test_data_ownership.py",
+      "-v"
+    ]
+  },
+  {
+    "name": "test_device_voice",
+    "returncode": 0,
+    "evidence": "baseline-test_device_voice.log",
+    "command": [
+      "/Users/bytedance/Documents/Codex/2026-09-08/du/work/step-01/runtime-venv/bin/python",
+      "-B",
+      "tests/test_device_voice.py",
+      "-v"
+    ]
+  },
+  {
+    "name": "test_memory",
+    "returncode": 0,
+    "evidence": "baseline-test_memory.log",
+    "command": [
+      "/Users/bytedance/Documents/Codex/2026-09-08/du/work/step-01/runtime-venv/bin/python",
+      "-B",
+      "tests/test_memory.py",
+      "-v"
+    ]
+  },
+  {
+    "name": "test_ownership_migration",
+    "returncode": 0,
+    "evidence": "baseline-test_ownership_migration.log",
+    "command": [
+      "/Users/bytedance/Documents/Codex/2026-09-08/du/work/step-01/runtime-venv/bin/python",
+      "-B",
+      "tests/test_ownership_migration.py",
+      "-v"
+    ]
+  },
+  {
+    "name": "test_pairing_activation",
+    "returncode": 0,
+    "evidence": "baseline-test_pairing_activation.log",
+    "command": [
+      "/Users/bytedance/Documents/Codex/2026-09-08/du/work/step-01/runtime-venv/bin/python",
+      "-B",
+      "tests/test_pairing_activation.py",
+      "-v"
+    ]
+  },
+  {
+    "name": "test_persona_dialogue",
+    "returncode": 0,
+    "evidence": "baseline-test_persona_dialogue.log",
+    "command": [
+      "/Users/bytedance/Documents/Codex/2026-09-08/du/work/step-01/runtime-venv/bin/python",
+      "-B",
+      "tests/test_persona_dialogue.py",
+      "-v"
+    ]
+  },
+  {
+    "name": "test_primary_flow",
+    "returncode": 0,
+    "evidence": "baseline-test_primary_flow.log",
+    "command": [
+      "/Users/bytedance/Documents/Codex/2026-09-08/du/work/step-01/runtime-venv/bin/python",
+      "-B",
+      "tests/test_primary_flow.py",
+      "-v"
+    ]
+  },
+  {
+    "name": "test_voice_turns",
+    "returncode": 0,
+    "evidence": "baseline-test_voice_turns.log",
+    "command": [
+      "/Users/bytedance/Documents/Codex/2026-09-08/du/work/step-01/runtime-venv/bin/python",
+      "-B",
+      "tests/test_voice_turns.py",
+      "-v"
+    ]
+  },
+  {
+    "name": "hardware_adapter",
+    "returncode": 0,
+    "evidence": "baseline-hardware_adapter.log",
+    "command": [
+      "/Users/bytedance/Documents/Codex/2026-09-08/du/work/step-01/runtime-venv/bin/python",
+      "-B",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "hardware_adapter/tests",
+      "-v"
+    ]
+  },
+  {
+    "name": "test_auth",
+    "returncode": 0,
+    "evidence": "baseline-test_auth.log",
+    "command": [
+      "npm",
+      "run",
+      "test:auth"
+    ]
+  },
+  {
+    "name": "test_flow",
+    "returncode": 0,
+    "evidence": "baseline-test_flow.log",
+    "command": [
+      "npm",
+      "run",
+      "test:flow"
+    ]
+  },
+  {
+    "name": "test_voice",
+    "returncode": 0,
+    "evidence": "baseline-test_voice.log",
+    "command": [
+      "npm",
+      "run",
+      "test:voice"
+    ]
+  },
+  {
+    "name": "test_audio",
+    "returncode": 0,
+    "evidence": "baseline-test_audio.log",
+    "command": [
+      "npm",
+      "run",
+      "test:audio"
+    ]
+  },
+  {
+    "name": "build",
+    "returncode": 0,
+    "evidence": "baseline-build.log",
+    "command": [
+      "npm",
+      "run",
+      "build"
+    ]
+  },
+  {
+    "name": "pip_check",
+    "returncode": 0,
+    "evidence": "baseline-pip_check.log",
+    "command": [
+      "/Users/bytedance/Documents/Codex/2026-09-08/du/work/step-01/runtime-venv/bin/python",
+      "-m",
+      "pip",
+      "check"
+    ]
+  }
+]

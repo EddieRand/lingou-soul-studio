@@ -2865,6 +2865,10 @@ body {
   left: 20px;
   right: 20px;
   bottom: calc(env(safe-area-inset-bottom, 0px) + 24px);
+  max-height: calc(100svh - env(safe-area-inset-bottom, 0px) - 48px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
   z-index: 5;
   display: flex;
   flex-direction: column;
@@ -2884,6 +2888,10 @@ body {
   animation: login-sheet-enter 360ms ease-out both;
 }
 
+.login-sheet::-webkit-scrollbar {
+  display: none;
+}
+
 .login-sheet::before {
   content: '';
   position: absolute;
@@ -2897,9 +2905,104 @@ body {
 }
 
 .login-oauth-button,
+.login-sheet-heading,
+.login-account-form,
+.login-register-link,
 .login-agreement {
   position: relative;
   z-index: 1;
+}
+
+.login-sheet-heading p {
+  color: #321467;
+  font-size: 22px;
+  font-weight: 900;
+  line-height: 1.15;
+}
+
+.login-sheet-heading span {
+  display: block;
+  margin-top: 5px;
+  color: rgba(93, 56, 153, 0.72);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.login-account-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.login-account-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: rgba(74, 39, 137, 0.84);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.login-account-form input {
+  width: 100%;
+  height: 48px;
+  border: 1px solid rgba(118, 76, 194, 0.2);
+  border-radius: 17px;
+  outline: none;
+  padding: 0 15px;
+  color: #321467;
+  background: rgba(255, 255, 255, 0.62);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+  font-size: 16px;
+  font-weight: 650;
+  transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
+}
+
+.login-account-form input:focus {
+  border-color: rgba(124, 58, 237, 0.62);
+  background: rgba(255, 255, 255, 0.8);
+  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.13), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+
+.login-account-submit {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  height: 52px;
+  margin-top: 2px;
+  border: 0;
+  border-radius: 19px;
+  color: white;
+  background:
+    radial-gradient(circle at 25% 0%, rgba(255, 255, 255, 0.3), transparent 34%),
+    linear-gradient(135deg, #8b5cf6 0%, #c04ff5 54%, #ec4899 100%);
+  box-shadow: 0 14px 30px rgba(124, 58, 237, 0.27), inset 0 1px 0 rgba(255, 255, 255, 0.4);
+  font-size: 17px;
+  font-weight: 850;
+  transition: transform 140ms ease, filter 140ms ease;
+}
+
+.login-account-submit:active {
+  transform: scale(0.985);
+}
+
+.login-account-submit:disabled {
+  cursor: default;
+  filter: saturate(0.8);
+}
+
+.login-register-link {
+  color: rgba(93, 56, 153, 0.75);
+  font-size: 13px;
+  font-weight: 650;
+  text-align: center;
+}
+
+.login-register-link a {
+  color: #6d3de5;
+  font-weight: 850;
 }
 
 .login-oauth-button {

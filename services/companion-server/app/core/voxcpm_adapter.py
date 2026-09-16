@@ -6,7 +6,7 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from data.store import DATA_DIR
+from data.store import DATA_DIR, resolve_voice_reference
 
 
 def _url() -> str:
@@ -26,8 +26,9 @@ def clone_synthesize(text: str, ref_audio_path: str, prompt_text: str = "",
                      figure_id: str = "") -> Optional[str]:
     """零样本克隆合成：返回保存的 wav 路径，失败返回 None。"""
     try:
-        ref_b64 = base64.b64encode(open(ref_audio_path, "rb").read()).decode()
-        fmt = Path(ref_audio_path).suffix.lower().lstrip(".") or "wav"
+        reference = resolve_voice_reference(ref_audio_path, storage_key=figure_id)
+        ref_b64 = base64.b64encode(reference.read_bytes()).decode()
+        fmt = reference.suffix.lower().lstrip(".") or "wav"
         body = json.dumps({
             "text": text, "prompt_audio_b64": ref_b64, "prompt_audio_format": fmt,
             "prompt_text": prompt_text or "",
