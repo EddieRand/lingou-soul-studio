@@ -1,0 +1,144 @@
+{
+  "created_at": "2026-09-17T07:33:14.259375+00:00",
+  "environment": "loopback WebSocket with controlled service impairment",
+  "transport": "websocket",
+  "profile_id": "ws-pcm-s16le-v1",
+  "scope": "Real WebSocket/reconnect/client tasks with fake audio and no provider calls; not an RF or internet packet-loss test.",
+  "scenarios": [
+    {
+      "name": "stable_loopback",
+      "passed": true,
+      "response_delay_ms": 0,
+      "chunk_intervals_ms": [
+        0,
+        0,
+        0
+      ],
+      "queued_to_first_audio_ms": 0.3,
+      "queued_to_playback_complete_ms": 0.5,
+      "received_chunks": 3,
+      "client_counters": {
+        "connection_attempts": 1,
+        "successful_connections": 1,
+        "uplink_frames": 1,
+        "uplink_bytes": 640,
+        "downlink_frames": 3,
+        "downlink_bytes": 1920,
+        "dropped_input_frames": 0,
+        "reconnect_attempts": 0,
+        "session_id": "SESSION-1-f74d05d0",
+        "turn_id": "TURN-f80fce29",
+        "active_audio_count": 0,
+        "queued_audio_frames": 0
+      },
+      "receipt_sequence": [
+        "decoded",
+        "playback_started",
+        "playback_completed"
+      ]
+    },
+    {
+      "name": "fixed_100ms",
+      "passed": true,
+      "response_delay_ms": 100,
+      "chunk_intervals_ms": [
+        0,
+        0,
+        0
+      ],
+      "queued_to_first_audio_ms": 101.7,
+      "queued_to_playback_complete_ms": 102.0,
+      "received_chunks": 3,
+      "client_counters": {
+        "connection_attempts": 1,
+        "successful_connections": 1,
+        "uplink_frames": 1,
+        "uplink_bytes": 640,
+        "downlink_frames": 3,
+        "downlink_bytes": 1920,
+        "dropped_input_frames": 0,
+        "reconnect_attempts": 0,
+        "session_id": "SESSION-1-920f4eb2",
+        "turn_id": "TURN-cd25aa0f",
+        "active_audio_count": 0,
+        "queued_audio_frames": 0
+      },
+      "receipt_sequence": [
+        "decoded",
+        "playback_started",
+        "playback_completed"
+      ]
+    },
+    {
+      "name": "jitter_100_120_10_80ms",
+      "passed": true,
+      "response_delay_ms": 100,
+      "chunk_intervals_ms": [
+        0,
+        120,
+        10,
+        80
+      ],
+      "queued_to_first_audio_ms": 102.1,
+      "queued_to_playback_complete_ms": 316.6,
+      "received_chunks": 4,
+      "client_counters": {
+        "connection_attempts": 1,
+        "successful_connections": 1,
+        "uplink_frames": 1,
+        "uplink_bytes": 640,
+        "downlink_frames": 4,
+        "downlink_bytes": 2560,
+        "dropped_input_frames": 0,
+        "reconnect_attempts": 0,
+        "session_id": "SESSION-1-6e25b388",
+        "turn_id": "TURN-3cbb3715",
+        "active_audio_count": 0,
+        "queued_audio_frames": 0
+      },
+      "receipt_sequence": [
+        "decoded",
+        "playback_started",
+        "playback_completed"
+      ]
+    },
+    {
+      "name": "thirty_second_outage",
+      "passed": false,
+      "requested_outage_seconds": 30.0,
+      "actual_outage_seconds": 30.023,
+      "new_session": true,
+      "frames_received_before_new_input": 10,
+      "offline_frames_uploaded_after_reconnect": 10,
+      "post_recovery_frame_received": true,
+      "client_counters": {
+        "connection_attempts": 6,
+        "successful_connections": 2,
+        "uplink_frames": 12,
+        "uplink_bytes": 7680,
+        "downlink_frames": 0,
+        "downlink_bytes": 0,
+        "dropped_input_frames": 0,
+        "reconnect_attempts": 5,
+        "session_id": "SESSION-1-f5411ddf",
+        "turn_id": null,
+        "active_audio_count": 0,
+        "queued_audio_frames": 0
+      },
+      "observation_events": [
+        "socket_connected",
+        "session_started",
+        "socket_disconnected",
+        "reconnect_started",
+        "reconnect_started",
+        "reconnect_started",
+        "reconnect_started",
+        "reconnect_started",
+        "socket_connected",
+        "reconnect_completed",
+        "session_started"
+      ]
+    }
+  ],
+  "passed": false
+}

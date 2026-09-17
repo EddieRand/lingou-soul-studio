@@ -1,11 +1,33 @@
 # Hardware adapter
 
+## Board HAL
+
+`hardware_adapter/hal` defines the board-neutral voice-device ports, lifecycle,
+task budgets, fake HAL and bridge into the existing device voice client.
+DNESP32S3 GPIO values live only in its board profile. See
+[the HAL design](../docs/hardware-hal.md) and
+[EV-03 evidence](../docs/validation/ev03-hal-20260917/README.md).
+The bounded capture/playback implementation and its remaining physical checks
+are recorded in
+[EV-04 evidence](../docs/validation/ev04-audio-pipeline-20260917/README.md).
+
+Run its contracts without target hardware:
+
+```bash
+python -B hardware_adapter/tests/test_hal_contract.py
+```
+
+The fake resource values prove the schema only; they are not target ESP32
+measurements.
+
 ## Portable carrier MVP
 
 `portable_voice_client` turns a Linux/macOS computer with a microphone and
 speaker into the step-11 independent device MVP. It talks to the device
 WebSocket directly, uses no browser or user Bearer token, reports real playback,
-and reconnects after transient network failures.
+and reconnects after transient network failures. Its playback queue is bounded
+to eight frames; saturation fails and clears active audio rather than delaying
+control messages.
 
 ```bash
 python3 -m venv .venv-portable

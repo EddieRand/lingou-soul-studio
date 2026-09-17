@@ -1,0 +1,11 @@
+{
+  "measured_at_local": "2026-09-17 15:50:58",
+  "tool": "macOS networkQuality -c",
+  "interface_name": "utun4",
+  "base_rtt_ms": 77.168,
+  "download_bits_per_second": 33470236,
+  "upload_bits_per_second": 34968940,
+  "responsiveness_round_trips_per_minute": 109.237,
+  "test_endpoint": "hkhkg1-edge-fx-003.aaplimg.com",
+  "scope": "Execution-environment internet baseline, not a Volcengine endpoint SLA"
+}

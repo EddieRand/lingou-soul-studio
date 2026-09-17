@@ -1,0 +1,26 @@
+{
+  "measured_at": "2026-09-17",
+  "tool": "arduino-cli 1.5.1",
+  "fqbn": "esp32:esp32:esp32s3",
+  "sketch": "firmware/lingou_device_v1",
+  "compile_result": "pass",
+  "program_storage": {
+    "used_bytes": 1110081,
+    "maximum_bytes": 1310720,
+    "reported_percent": 84
+  },
+  "global_dynamic_memory": {
+    "used_bytes": 49596,
+    "maximum_bytes": 327680,
+    "remaining_for_local_variables_bytes": 278084,
+    "reported_percent": 15
+  },
+  "runtime_metrics": {
+    "free_heap_bytes": null,
+    "minimum_free_heap_bytes": null,
+    "free_psram_bytes": null,
+    "stack_high_water_bytes": null,
+    "cpu_percent_by_task": null
+  },
+  "runtime_metrics_status": "not_measured_no_target_device"
+}

@@ -56,6 +56,7 @@ async def _run_carrier(
         SoundDeviceAudioBackend,
     )
 
+    observations: list[dict] = []
     audio = SoundDeviceAudioBackend(
         input_device=input_device,
         output_device=output_device,
@@ -64,6 +65,7 @@ async def _run_carrier(
         server_url=f"ws://127.0.0.1:{port}/api/asr/device-stream",
         device_credential=credential,
         audio=audio,
+        observation_sink=observations.append,
     )
     client_task = asyncio.create_task(
         client.run(),
@@ -74,19 +76,46 @@ async def _run_carrier(
         await asyncio.wait_for(client.provider_ready_event.wait(), timeout=15)
         # This is intentionally acoustic: speaker output is recaptured by the
         # microphone. No input fixture bytes are injected into the WebSocket.
+        prompt_started = asyncio.get_running_loop().time()
         await audio.play(prompt_pcm)
+        prompt_completed = asyncio.get_running_loop().time()
         await asyncio.wait_for(
-            client.playback_completed_event.wait(),
-            timeout=75,
+            client.turn_metrics_event.wait(),
+            timeout=90,
         )
         if not client.last_final_text:
             raise AssertionError("portable carrier produced no ASR text")
         if not client.last_reply_text:
             raise AssertionError("portable carrier produced no reply")
+        if client.last_turn_metrics.get("status") != "completed":
+            raise AssertionError(
+                f"portable carrier turn did not complete: "
+                f"{client.last_turn_metrics}"
+            )
+        origin_ms = prompt_started * 1000
+        relative_observations = [
+            {
+                **item,
+                "relative_to_prompt_ms": round(
+                    float(item["monotonic_ms"]) - origin_ms,
+                    1,
+                ),
+            }
+            for item in observations
+        ]
         return {
             "asr_text": client.last_final_text,
             "reply_text": client.last_reply_text,
             "completed_audio_id": client.last_completed_audio_id,
+            "session_id": client.session_id,
+            "turn_id": client.last_turn_metrics.get("turn_id"),
+            "server_timings_ms": client.last_turn_metrics.get("timings", {}),
+            "prompt_playback_ms": round(
+                (prompt_completed - prompt_started) * 1000,
+                1,
+            ),
+            "client_observations": relative_observations,
+            "client_counters": client.metrics_snapshot(),
         }
     finally:
         client.request_stop()

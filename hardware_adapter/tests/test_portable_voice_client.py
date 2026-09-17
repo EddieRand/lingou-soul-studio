@@ -12,6 +12,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from hardware_adapter.portable_voice_client import (
     INPUT_FRAME_BYTES,
+    PLAYBACK_QUEUE_CAPACITY,
     PortableVoiceClient,
     SoundDeviceAudioBackend,
 )
@@ -45,6 +46,15 @@ class FakeAudio:
     async def alert(self):
         self.alerts += 1
 
+    def discard_input_buffer(self):
+        discarded = 0
+        while True:
+            try:
+                self.input_queue.get_nowait()
+                discarded += 1
+            except asyncio.QueueEmpty:
+                return discarded
+
     def set_input_muted(self, muted):
         self.muted = muted
 
@@ -60,10 +70,12 @@ class FakeWebSocket:
 class PortableVoiceClientTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.audio = FakeAudio()
+        self.observations: list[dict] = []
         self.client = PortableVoiceClient(
             server_url="ws://127.0.0.1:8000/api/asr/device-stream",
             device_credential="BASE-PORTABLE." + ("x" * 43),
             audio=self.audio,
+            observation_sink=self.observations.append,
         )
         self.websocket = FakeWebSocket()
         self.client.websocket = self.websocket
@@ -120,6 +132,12 @@ class PortableVoiceClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(item["session_id"] == "SESSION-1" for item in receipts))
         self.assertTrue(all(item["turn_id"] == "TURN-1" for item in receipts))
         self.assertTrue(all(item["audio_id"] == "AUDIO-1" for item in receipts))
+        self.assertEqual(self.client.metrics_snapshot()["downlink_frames"], 1)
+        self.assertEqual(self.client.metrics_snapshot()["downlink_bytes"], 4)
+        observed_events = [item["event"] for item in self.observations]
+        self.assertIn("first_audio_received", observed_events)
+        self.assertIn("audio_output_started", observed_events)
+        self.assertIn("audio_output_completed", observed_events)
 
     async def test_final_and_reply_text_are_exposed_for_health_checks(self):
         await self.client._handle_server_message({
@@ -132,8 +150,23 @@ class PortableVoiceClientTests(unittest.IsolatedAsyncioTestCase):
             "session_id": "SESSION-1",
             "reply": "answered",
         })
+        await self.client._handle_server_message({
+            "type": "turn_metrics",
+            "session_id": "SESSION-1",
+            "turn_id": "TURN-1",
+            "status": "completed",
+            "timings": {"playback_completed_ms": 1200.0},
+        })
         self.assertEqual(self.client.last_final_text, "recognized")
         self.assertEqual(self.client.last_reply_text, "answered")
+        self.assertEqual(self.client.last_turn_metrics["status"], "completed")
+        self.assertTrue(self.client.final_text_event.is_set())
+        self.assertTrue(self.client.reply_text_event.is_set())
+        self.assertTrue(self.client.turn_metrics_event.is_set())
+        serialized = json.dumps(self.observations)
+        self.assertNotIn("recognized", serialized)
+        self.assertNotIn("answered", serialized)
+        self.assertNotIn(self.client.device_credential, serialized)
 
     async def test_interrupt_reports_failure_and_cancels_current_turn(self):
         self.client.server_speaking = True
@@ -181,6 +214,11 @@ class PortableVoiceClientTests(unittest.IsolatedAsyncioTestCase):
         sender.cancel()
         await asyncio.gather(sender, return_exceptions=True)
         self.assertEqual(self.websocket.sent, [b"\x00" * INPUT_FRAME_BYTES])
+        self.assertEqual(self.client.metrics_snapshot()["uplink_frames"], 1)
+        self.assertEqual(
+            self.client.metrics_snapshot()["uplink_bytes"],
+            INPUT_FRAME_BYTES,
+        )
 
     async def test_server_stop_unmutes_input_and_clears_playback(self):
         self.client.server_speaking = True
@@ -365,6 +403,49 @@ class PortableVoiceClientTests(unittest.IsolatedAsyncioTestCase):
             [item.get("stage") for item in receipts],
         )
 
+    async def test_slow_playback_overflow_is_bounded_and_fails_active_audio(self):
+        play_started = asyncio.Event()
+
+        async def blocked_play(_payload):
+            play_started.set()
+            await asyncio.Event().wait()
+
+        self.audio.play = blocked_play
+        self.client.server_speaking = True
+        chunk_count = PLAYBACK_QUEUE_CAPACITY + 2
+        await self.client._handle_server_message(
+            self._chunk(chunk_count=chunk_count)
+        )
+        await self.client._handle_audio_frame(b"\x00" * 4)
+        await asyncio.wait_for(play_started.wait(), timeout=1)
+
+        for chunk_index in range(1, PLAYBACK_QUEUE_CAPACITY + 1):
+            await self.client._handle_server_message(self._chunk(
+                chunk_index=chunk_index,
+                chunk_count=chunk_count,
+            ))
+            await self.client._handle_audio_frame(b"\x00" * 4)
+
+        await self.client._handle_server_message(self._chunk(
+            chunk_index=PLAYBACK_QUEUE_CAPACITY + 1,
+            chunk_count=chunk_count,
+        ))
+        with self.assertRaisesRegex(RuntimeError, "playback queue is full"):
+            await self.client._handle_audio_frame(b"\x00" * 4)
+
+        metrics = self.client.metrics_snapshot()
+        self.assertEqual(metrics["playback_overflows"], 1)
+        self.assertEqual(metrics["queued_audio_frames"], 0)
+        self.assertGreaterEqual(
+            metrics["playback_dropped_frames"],
+            PLAYBACK_QUEUE_CAPACITY + 1,
+        )
+        receipts = [json.loads(item) for item in self.websocket.sent]
+        self.assertNotIn(
+            "playback_completed",
+            [item.get("stage") for item in receipts],
+        )
+
     async def test_clean_disconnect_uses_reconnect_backoff(self):
         attempts = 0
         started_at = asyncio.get_running_loop().time()
@@ -387,6 +468,24 @@ class PortableVoiceClientTests(unittest.IsolatedAsyncioTestCase):
             0.015,
         )
         self.assertEqual(self.audio.alerts, 0)
+
+    async def test_connection_reset_discards_offline_microphone_backlog(self):
+        await self.audio.input_queue.put(b"\x01" * INPUT_FRAME_BYTES)
+        await self.audio.input_queue.put(b"\x02" * INPUT_FRAME_BYTES)
+
+        await self.client._reset_connection_state(report_failure=False)
+
+        self.assertTrue(self.audio.input_queue.empty())
+        self.assertEqual(
+            self.client.metrics_snapshot()["dropped_input_frames"],
+            2,
+        )
+        discarded = [
+            item
+            for item in self.observations
+            if item["event"] == "input_buffer_discarded"
+        ]
+        self.assertEqual(discarded[-1]["frames"], 2)
 
     async def test_shutdown_closes_audio_when_stop_playback_fails(self):
         async def fail_stop_playback():
@@ -432,6 +531,22 @@ class PortableVoiceClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(state["closed"])
         self.assertIsNone(audio._input_stream)
+
+    async def test_sounddevice_reports_input_overflow_and_output_underflow(self):
+        class OutputStream:
+            def write(self, _payload):
+                return True
+
+        audio = SoundDeviceAudioBackend()
+        for _ in range(audio._input_queue.maxsize + 1):
+            audio._enqueue_input(b"\x00" * INPUT_FRAME_BYTES)
+        audio._output_stream = OutputStream()
+
+        await audio.play(b"\x00\x00")
+
+        metrics = audio.metrics_snapshot()
+        self.assertEqual(metrics["input_queue_overflows"], 1)
+        self.assertEqual(metrics["playback_underruns"], 1)
 
     async def test_transient_disconnect_alerts_and_reconnects(self):
         attempts = 0

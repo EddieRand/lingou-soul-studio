@@ -1,0 +1,139 @@
+{
+  "created_at": "2026-09-17T08:24:46.000978+00:00",
+  "branch_intent": "feat/hardware-voice-adapter",
+  "board_profile": {
+    "profile_id": "dnesp32s3-rev-a",
+    "mcu": "ESP32-S3",
+    "microphone_model": "INMP441",
+    "amplifier_model": "MAX98357A",
+    "microphone_format": {
+      "sample_rate_hz": 16000,
+      "channels": 1,
+      "sample_width_bytes": 2,
+      "frame_duration_ms": 20,
+      "max_frame_bytes": null
+    },
+    "speaker_format": {
+      "sample_rate_hz": 24000,
+      "channels": 1,
+      "sample_width_bytes": 2,
+      "frame_duration_ms": null,
+      "max_frame_bytes": 4096
+    },
+    "pinout": {
+      "led": 18,
+      "fsr": 16,
+      "microphone_bclk": 5,
+      "microphone_ws": 7,
+      "microphone_data_in": 4,
+      "speaker_bclk": 6,
+      "speaker_lrc": 15,
+      "speaker_data_out": 17
+    },
+    "validated_aec": false
+  },
+  "task_model": [
+    {
+      "role": "control",
+      "name": "lingou_control",
+      "priority": 8,
+      "stack_budget_bytes": 4096,
+      "queue_capacity": 32,
+      "overflow_policy": "reject_new",
+      "core_affinity": 0,
+      "responsibility": "Own session state, cancellation, lifecycle and indicator commands."
+    },
+    {
+      "role": "audio_capture",
+      "name": "lingou_capture",
+      "priority": 7,
+      "stack_budget_bytes": 4096,
+      "queue_capacity": 50,
+      "overflow_policy": "drop_oldest",
+      "core_affinity": 1,
+      "responsibility": "Read fixed 20 ms microphone frames and hand them to media transport."
+    },
+    {
+      "role": "audio_playback",
+      "name": "lingou_playback",
+      "priority": 7,
+      "stack_budget_bytes": 4096,
+      "queue_capacity": 24,
+      "overflow_policy": "block_with_timeout",
+      "core_affinity": 1,
+      "responsibility": "Write ordered output frames and allow control to abort immediately."
+    },
+    {
+      "role": "network",
+      "name": "lingou_network",
+      "priority": 6,
+      "stack_budget_bytes": 6144,
+      "queue_capacity": 24,
+      "overflow_policy": "reject_new",
+      "core_affinity": 0,
+      "responsibility": "Own Wi-Fi, TLS, transport heartbeats and reconnect backoff."
+    },
+    {
+      "role": "diagnostics",
+      "name": "lingou_diagnostics",
+      "priority": 2,
+      "stack_budget_bytes": 3072,
+      "queue_capacity": 64,
+      "overflow_policy": "drop_oldest",
+      "core_affinity": 0,
+      "responsibility": "Sample resource and network counters without blocking media tasks."
+    }
+  ],
+  "fake_hal": {
+    "measurement_kind": "simulated_contract_fixture",
+    "must_not_be_used_as_target_hardware_evidence": true,
+    "resource_snapshot": {
+      "monotonic_ms": 1000,
+      "source": "fake_hal_simulated",
+      "free_heap_bytes": 220000,
+      "minimum_free_heap_bytes": 200000,
+      "free_psram_bytes": 8388608,
+      "stack_high_water_bytes": {
+        "lingou_control": 2048,
+        "lingou_capture": 2304,
+        "lingou_playback": 2304,
+        "lingou_network": 3072,
+        "lingou_diagnostics": 1536
+      },
+      "cpu_percent_by_task": {
+        "lingou_control": 2.0,
+        "lingou_capture": 8.0,
+        "lingou_playback": 6.0,
+        "lingou_network": 4.0,
+        "lingou_diagnostics": 1.0
+      }
+    },
+    "lifecycle_audit": [
+      "start:secure_storage",
+      "start:network",
+      "start:microphone",
+      "start:speaker",
+      "start:inputs",
+      "start:indicator",
+      "start:resources",
+      "stop:resources",
+      "stop:indicator",
+      "stop:inputs",
+      "stop:speaker",
+      "stop:microphone",
+      "stop:network",
+      "stop:secure_storage"
+    ]
+  },
+  "target_hardware": {
+    "connected": false,
+    "candidate_serial_ports": [],
+    "measurement_kind": "not_measured",
+    "free_heap_bytes": null,
+    "minimum_free_heap_bytes": null,
+    "free_psram_bytes": null,
+    "stack_high_water_bytes": null,
+    "cpu_percent_by_task": null,
+    "blocked_reason": "No target ESP32 serial device is connected."
+  }
+}

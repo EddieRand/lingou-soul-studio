@@ -1,0 +1,88 @@
+{
+  "created_at": "2026-09-17T07:59:27.561246+00:00",
+  "input_device": "0",
+  "output_device": "1",
+  "input_sample_rate": 16000,
+  "output_sample_rate": 24000,
+  "tone_frequency_hz": 997,
+  "tone_amplitude": 3000,
+  "raw_audio_saved": false,
+  "trials": [
+    {
+      "baseline": {
+        "frames": 50,
+        "samples": 16000,
+        "rms": 264.43,
+        "peak": 1178,
+        "tone_component": 0.51
+      },
+      "tone": {
+        "frames": 60,
+        "samples": 19200,
+        "rms": 375.49,
+        "peak": 1902,
+        "tone_component": 1.01
+      },
+      "audio_metrics": {
+        "input_overflows": 0,
+        "input_queue_overflows": 0,
+        "playback_underruns": 1
+      },
+      "tone_component_ratio": 1.98,
+      "tone_detected": false
+    },
+    {
+      "baseline": {
+        "frames": 50,
+        "samples": 16000,
+        "rms": 287.41,
+        "peak": 1134,
+        "tone_component": 0.83
+      },
+      "tone": {
+        "frames": 60,
+        "samples": 19200,
+        "rms": 312.93,
+        "peak": 1206,
+        "tone_component": 2.15
+      },
+      "audio_metrics": {
+        "input_overflows": 0,
+        "input_queue_overflows": 0,
+        "playback_underruns": 1
+      },
+      "tone_component_ratio": 2.59,
+      "tone_detected": false
+    },
+    {
+      "baseline": {
+        "frames": 50,
+        "samples": 16000,
+        "rms": 243.74,
+        "peak": 937,
+        "tone_component": 0.84
+      },
+      "tone": {
+        "frames": 60,
+        "samples": 19200,
+        "rms": 360.36,
+        "peak": 1357,
+        "tone_component": 1.17
+      },
+      "audio_metrics": {
+        "input_overflows": 0,
+        "input_queue_overflows": 0,
+        "playback_underruns": 1
+      },
+      "tone_component_ratio": 1.39,
+      "tone_detected": false
+    }
+  ],
+  "summary": {
+    "requested": 3,
+    "tone_detected": 0,
+    "ratio_min": 1.39,
+    "ratio_median": 1.98,
+    "ratio_max": 2.59
+  }
+}

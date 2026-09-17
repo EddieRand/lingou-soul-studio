@@ -5,6 +5,13 @@ MVP uses the portable Linux/macOS carrier described in
 [`docs/portable-device-mvp.md`](../../docs/portable-device-mvp.md); final custom
 hardware requires a separate hardware-engineering acceptance.
 
+EV-03 moves board constants into
+[`hal/dnesp32s3_board_profile.h`](hal/dnesp32s3_board_profile.h) and defines
+the firmware-side port boundaries in
+[`hal/lingou_hal_contract.h`](hal/lingou_hal_contract.h). EV-04 adds fixed
+capture/playback slot pools and dedicated FreeRTOS audio tasks so WebSocket
+callbacks never write I2S directly.
+
 | Function | GPIO |
 |---|---|
 | WS2812B ring | 18 |
@@ -65,12 +72,19 @@ the board is absent or while another serial monitor owns the port.
 
 - Startup flashes red exactly three times, then attempts Wi-Fi and WSS.
 - Microphone sends 20 ms frames of 16 kHz, signed 16-bit little-endian PCM.
+- The capture task writes to a 12-frame bounded queue. If the network consumer
+  falls behind, it drops the oldest unsent frame rather than blocking I2S.
 - Backend returns 24 kHz, signed 16-bit little-endian mono PCM in frames no
   larger than 4096 bytes.
-- Firmware duplicates mono samples to the verified stereo I2S output and sends
-  decoded, playback-started and playback-completed receipts.
+- The WebSocket callback copies downlink data into an eight-slot jitter buffer.
+  A dedicated task duplicates mono samples to stereo and uses finite 15 ms I2S
+  writes. Queue saturation fails the active audio instead of blocking control.
+- Playback receipts are emitted by the control loop from playback-task events;
+  `playback_completed` is suppressed after cancellation or generation change.
 - A heavy FSR press while the character is speaking stops I2S output and
-  cancels the original server turn.
+  cancels the original server turn. The local abort path invalidates the old
+  generation and clears DMA before sending network receipts, with a 40 ms
+  software lock timeout.
 - During playback the microphone is muted because this hardware revision has
   no validated acoustic echo cancellation. The heavy press is the reliable
   interruption mechanism for this MVP.
@@ -78,6 +92,11 @@ the board is absent or while another serial monitor owns the port.
   prompt. Recovery reconnects to a fresh voice session; queued replies are not
   replayed.
 - When idle, the I2S DMA buffer is zeroed so MAX98357A output remains low.
+- Every 10 seconds serial output reports queue depth, overflow, dropped-frame,
+  underrun and maximum queue-wait counters under the `AUDIO_PIPELINE` prefix.
+
+The 40 ms interruption value is an implementation bound, not measured
+speaker-stop latency. Target-board audio and serial evidence remain required.
 
 ## Protocol
 

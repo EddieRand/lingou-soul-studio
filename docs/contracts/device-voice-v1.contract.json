@@ -1,0 +1,248 @@
+{
+  "contract_name": "LINGOU device voice capability contract",
+  "contract_revision": 1,
+  "subprotocol": "lingou.device.voice.v1",
+  "endpoint": "/api/asr/device-stream",
+  "negotiation": {
+    "hello_type": "device_hello",
+    "selection_type": "session_config",
+    "error_type": "protocol_error",
+    "configuration_scope": "websocket_connection",
+    "hello_timing": "before_first_binary_uplink",
+    "client_wait_timeout_ms": 1000,
+    "no_hello_behavior": "select_legacy_profile",
+    "unknown_optional_fields": "ignore",
+    "unknown_profile_ids": "ignore",
+    "malformed_hello": "reject_connection",
+    "late_hello": "keep_legacy_profile_and_report_negotiation_locked",
+    "requires_hello_each_connection": true
+  },
+  "identity": {
+    "authority": "authorization_header",
+    "server_owned_fields": [
+      "owner_user_id",
+      "base_id",
+      "figure_id",
+      "session_id",
+      "turn_id",
+      "audio_id"
+    ],
+    "forbidden_device_hello_fields": [
+      "owner",
+      "owner_user_id",
+      "base_id",
+      "figure_id",
+      "session_id",
+      "turn_id",
+      "audio_id",
+      "credential",
+      "device_credential",
+      "access_token",
+      "rtc_token",
+      "app_key",
+      "ak",
+      "sk"
+    ]
+  },
+  "profiles": {
+    "ws-pcm-s16le-v1": {
+      "state": "enabled",
+      "transport": "websocket",
+      "uplink": {
+        "codec": "pcm_s16le",
+        "sample_rate_hz": 16000,
+        "channels": 1,
+        "frame_duration_ms": 20,
+        "frame_bytes": 640
+      },
+      "downlink": {
+        "codec": "pcm_s16le",
+        "sample_rate_hz": 24000,
+        "channels": 1,
+        "max_frame_bytes": 4096
+      },
+      "duplex_modes": [
+        "half_duplex"
+      ]
+    },
+    "ws-opus-v1": {
+      "state": "planned",
+      "transport": "websocket",
+      "uplink": {
+        "codec": "opus",
+        "sample_rate_hz": 16000,
+        "channels": 1,
+        "frame_duration_ms": 20
+      },
+      "downlink": {
+        "codec": "opus",
+        "sample_rate_hz": 24000,
+        "channels": 1
+      },
+      "duplex_modes": [
+        "half_duplex",
+        "full_duplex"
+      ]
+    },
+    "rtc-lite-v1": {
+      "state": "experimental",
+      "transport": "rtc",
+      "duplex_modes": [
+        "full_duplex"
+      ]
+    }
+  },
+  "selection": {
+    "legacy_profile_id": "ws-pcm-s16le-v1",
+    "enabled_profile_ids": [
+      "ws-pcm-s16le-v1"
+    ],
+    "server_preference": [
+      "ws-pcm-s16le-v1"
+    ],
+    "recommended_fallback_profile_id": "ws-pcm-s16le-v1",
+    "no_common_profile_error": "NO_COMMON_MEDIA_PROFILE",
+    "incompatible_close_code": 4406
+  },
+  "rtc_mapping": {
+    "authority": "lingou_application_server",
+    "room_id": "transport_local_session_resource",
+    "task_id": "transport_local_agent_resource",
+    "round_id": "mapped_to_server_allocated_turn_id",
+    "subtitle_interim": "interim",
+    "subtitle_final": "final",
+    "conversation_stage": "status_or_turn_metrics",
+    "remote_audio": "server_allocated_audio_id",
+    "voice_interrupt": "cancel_turn",
+    "playout_confirmation": "audio_playback",
+    "function_call": "server_side_allowlisted_tool_request"
+  },
+  "measurements": {
+    "correlation_fields": [
+      "session_id",
+      "turn_id",
+      "audio_id"
+    ],
+    "server_turn_marks": [
+      "speech_finalized",
+      "reply_started",
+      "first_audio_synthesized",
+      "first_audio_transferred",
+      "first_audio_decoded",
+      "playback_started",
+      "playback_completed",
+      "playback_failed",
+      "reply_completed",
+      "cancelled"
+    ],
+    "device_local_marks": [
+      "socket_connected",
+      "session_config_selected",
+      "first_audio_received",
+      "playback_buffer_started",
+      "audio_output_started",
+      "audio_output_stopped",
+      "cancel_requested",
+      "reconnect_started",
+      "reconnect_completed"
+    ],
+    "device_counters": [
+      "uplink_frames",
+      "downlink_frames",
+      "uplink_bytes",
+      "downlink_bytes",
+      "playback_underruns",
+      "playback_overflows",
+      "dropped_input_frames",
+      "reconnect_attempts"
+    ],
+    "clock_rule": "calculate_durations_within_one_monotonic_clock_domain",
+    "forbidden_content_fields": [
+      "user_input_text",
+      "reply_text",
+      "wifi_password",
+      "device_credential",
+      "access_token",
+      "rtc_token"
+    ]
+  },
+  "examples": [
+    {
+      "name": "legacy_client_without_hello",
+      "hello": null,
+      "expected": {
+        "status": "selected",
+        "mode": "legacy",
+        "profile_id": "ws-pcm-s16le-v1"
+      }
+    },
+    {
+      "name": "unknown_profile_is_ignored_when_legacy_is_available",
+      "hello": {
+        "type": "device_hello",
+        "protocol": "lingou.device.voice.v1",
+        "capabilities_version": 1,
+        "offered_profile_ids": [
+          "vendor-unknown-v9",
+          "ws-pcm-s16le-v1"
+        ]
+      },
+      "expected": {
+        "status": "selected",
+        "mode": "negotiated",
+        "profile_id": "ws-pcm-s16le-v1"
+      }
+    },
+    {
+      "name": "planned_opus_downgrades_to_enabled_pcm",
+      "hello": {
+        "type": "device_hello",
+        "protocol": "lingou.device.voice.v1",
+        "capabilities_version": 1,
+        "offered_profile_ids": [
+          "ws-opus-v1",
+          "ws-pcm-s16le-v1"
+        ]
+      },
+      "expected": {
+        "status": "selected",
+        "mode": "negotiated",
+        "profile_id": "ws-pcm-s16le-v1"
+      }
+    },
+    {
+      "name": "no_common_profile_is_rejected",
+      "hello": {
+        "type": "device_hello",
+        "protocol": "lingou.device.voice.v1",
+        "capabilities_version": 1,
+        "offered_profile_ids": [
+          "vendor-unknown-v9"
+        ]
+      },
+      "expected": {
+        "status": "rejected",
+        "code": "NO_COMMON_MEDIA_PROFILE",
+        "close_code": 4406
+      }
+    },
+    {
+      "name": "client_identity_injection_is_rejected",
+      "hello": {
+        "type": "device_hello",
+        "protocol": "lingou.device.voice.v1",
+        "capabilities_version": 1,
+        "offered_profile_ids": [
+          "ws-pcm-s16le-v1"
+        ],
+        "owner_user_id": "forged-owner",
+        "session_id": "forged-session"
+      },
+      "expected": {
+        "status": "rejected",
+        "code": "IDENTITY_FIELD_FORBIDDEN",
+        "close_code": 4406
+      }
+    }
+  ]
+}

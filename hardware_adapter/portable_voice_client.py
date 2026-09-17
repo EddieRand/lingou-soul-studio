@@ -12,7 +12,8 @@ import os
 import signal
 import ssl
 import sys
-from typing import Any, Optional, Protocol
+import time
+from typing import Any, Callable, Optional, Protocol
 from urllib.parse import urlparse
 
 
@@ -23,6 +24,7 @@ OUTPUT_SAMPLE_RATE = 24000
 CHANNELS = 1
 SAMPLE_WIDTH_BYTES = 2
 MAX_OUTPUT_FRAME_BYTES = 4096
+PLAYBACK_QUEUE_CAPACITY = 8
 INPUT_FRAME_SAMPLES = 320
 INPUT_FRAME_BYTES = INPUT_FRAME_SAMPLES * SAMPLE_WIDTH_BYTES
 SESSION_REPLACED_CLOSE_CODE = 4410
@@ -64,6 +66,8 @@ class AudioBackend(Protocol):
 
     def set_input_muted(self, muted: bool) -> None: ...
 
+    def discard_input_buffer(self) -> int: ...
+
 
 class SoundDeviceAudioBackend:
     """Raw PCM audio using PortAudio through python-sounddevice."""
@@ -82,6 +86,9 @@ class SoundDeviceAudioBackend:
         self._output_stream: Any = None
         self._input_muted = False
         self._output_lock = asyncio.Lock()
+        self._input_overflows = 0
+        self._input_queue_overflows = 0
+        self._playback_underruns = 0
 
     @staticmethod
     def _sounddevice():
@@ -104,6 +111,7 @@ class SoundDeviceAudioBackend:
         try:
             self._input_queue.put_nowait(payload)
         except asyncio.QueueFull:
+            self._input_queue_overflows += 1
             try:
                 self._input_queue.get_nowait()
             except asyncio.QueueEmpty:
@@ -116,6 +124,8 @@ class SoundDeviceAudioBackend:
     def _input_callback(self, indata, frames, _time_info, status) -> None:
         if status:
             print(f"[audio:input] {status}", file=sys.stderr)
+            if getattr(status, "input_overflow", False):
+                self._input_overflows += 1
         if frames <= 0 or self._loop is None or self._input_muted:
             return
         self._loop.call_soon_threadsafe(self._enqueue_input, bytes(indata))
@@ -171,7 +181,9 @@ class SoundDeviceAudioBackend:
             output_stream = self._output_stream
             if output_stream is None:
                 raise RuntimeError("output stream is not started")
-        await asyncio.to_thread(output_stream.write, payload)
+        underflowed = await asyncio.to_thread(output_stream.write, payload)
+        if underflowed:
+            self._playback_underruns += 1
 
     async def stop_playback(self) -> None:
         async with self._output_lock:
@@ -195,14 +207,26 @@ class SoundDeviceAudioBackend:
             samples.extend([0] * (OUTPUT_SAMPLE_RATE * 60 // 1000))
         await self.play(samples.tobytes())
 
+    def discard_input_buffer(self) -> int:
+        discarded = 0
+        while True:
+            try:
+                self._input_queue.get_nowait()
+                discarded += 1
+            except asyncio.QueueEmpty:
+                return discarded
+
+    def metrics_snapshot(self) -> dict[str, int]:
+        return {
+            "input_overflows": self._input_overflows,
+            "input_queue_overflows": self._input_queue_overflows,
+            "playback_underruns": self._playback_underruns,
+        }
+
     def set_input_muted(self, muted: bool) -> None:
         self._input_muted = muted
         if muted:
-            while True:
-                try:
-                    self._input_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
+            self.discard_input_buffer()
 
 
 class PortableVoiceClient:
@@ -214,6 +238,7 @@ class PortableVoiceClient:
         audio: AudioBackend,
         reconnect_initial_seconds: float = 1.0,
         reconnect_max_seconds: float = 15.0,
+        observation_sink: Optional[Callable[[dict[str, Any]], None]] = None,
     ):
         parsed = urlparse(server_url)
         if parsed.scheme not in {"ws", "wss"} or not parsed.netloc:
@@ -225,10 +250,14 @@ class PortableVoiceClient:
         self.audio = audio
         self.reconnect_initial_seconds = reconnect_initial_seconds
         self.reconnect_max_seconds = reconnect_max_seconds
+        self.observation_sink = observation_sink
         self.stop_event = asyncio.Event()
         self.resume_event = asyncio.Event()
         self.connected_event = asyncio.Event()
         self.provider_ready_event = asyncio.Event()
+        self.final_text_event = asyncio.Event()
+        self.reply_text_event = asyncio.Event()
+        self.turn_metrics_event = asyncio.Event()
         self.paused_for_replacement = False
         self.server_speaking = False
         self.session_id = ""
@@ -243,14 +272,88 @@ class PortableVoiceClient:
         self.cancelled_audio_ids: set[tuple[str, str, str]] = set()
         self.last_final_text = ""
         self.last_reply_text = ""
+        self.last_turn_metrics: dict[str, Any] = {}
         self.last_completed_audio_id = ""
         self.playback_completed_event = asyncio.Event()
         self._playback_queue: asyncio.Queue[
-            tuple[int, AudioChunkDescriptor, bytes]
-        ] = asyncio.Queue()
+            tuple[int, float, AudioChunkDescriptor, bytes]
+        ] = asyncio.Queue(maxsize=PLAYBACK_QUEUE_CAPACITY)
         self._playback_task: Optional[asyncio.Task] = None
         self._playback_generation = 0
         self._send_lock = asyncio.Lock()
+        self._received_audio_ids: set[str] = set()
+        self._observation_sequence = 0
+        self._counters = {
+            "connection_attempts": 0,
+            "successful_connections": 0,
+            "uplink_frames": 0,
+            "uplink_bytes": 0,
+            "downlink_frames": 0,
+            "downlink_bytes": 0,
+            "dropped_input_frames": 0,
+            "reconnect_attempts": 0,
+            "playback_overflows": 0,
+            "playback_dropped_frames": 0,
+            "playback_max_queue_depth": 0,
+            "playback_max_queue_wait_ms": 0.0,
+        }
+
+    def _observe(self, event: str, **details: Any) -> None:
+        sink = self.observation_sink
+        if sink is None:
+            return
+        self._observation_sequence += 1
+        payload = {
+            "sequence": self._observation_sequence,
+            "event": event,
+            "monotonic_ms": round(time.monotonic() * 1000, 3),
+            "session_id": self.session_id or None,
+            "turn_id": self.current_turn_id or None,
+            **details,
+        }
+        try:
+            sink(payload)
+        except Exception as exc:
+            print(
+                f"[carrier:metrics] observation sink failed: {exc}",
+                file=sys.stderr,
+            )
+
+    def metrics_snapshot(self) -> dict[str, Any]:
+        audio_metrics_reader = getattr(self.audio, "metrics_snapshot", None)
+        audio_metrics = (
+            audio_metrics_reader()
+            if callable(audio_metrics_reader)
+            else {}
+        )
+        return {
+            **self._counters,
+            "dropped_input_frames": (
+                self._counters["dropped_input_frames"]
+                + int(audio_metrics.get("input_queue_overflows", 0))
+            ),
+            "input_overflows": audio_metrics.get("input_overflows"),
+            "input_queue_overflows": audio_metrics.get(
+                "input_queue_overflows"
+            ),
+            "playback_underruns": audio_metrics.get("playback_underruns"),
+            "session_id": self.session_id or None,
+            "turn_id": self.current_turn_id or None,
+            "active_audio_count": len(self.active_audio_ids),
+            "queued_audio_frames": self._playback_queue.qsize(),
+        }
+
+    def _discard_input_buffer(self) -> None:
+        discard = getattr(self.audio, "discard_input_buffer", None)
+        if callable(discard):
+            discarded = int(discard() or 0)
+        else:
+            self.audio.set_input_muted(True)
+            self.audio.set_input_muted(False)
+            discarded = 0
+        if discarded:
+            self._counters["dropped_input_frames"] += discarded
+            self._observe("input_buffer_discarded", frames=discarded)
 
     def request_stop(self) -> None:
         self.stop_event.set()
@@ -266,6 +369,7 @@ class PortableVoiceClient:
             return
         if self.session_id and self.current_turn_id:
             self.cancelled_turns.add((self.session_id, self.current_turn_id))
+        self._observe("cancel_requested")
         await self._fail_active_audio("carrier_interrupted")
         await self._send_json({
             "type": "cancel_turn",
@@ -274,6 +378,7 @@ class PortableVoiceClient:
 
     async def run(self) -> None:
         await self.audio.start()
+        self._observe("carrier_started")
         try:
             delay = self.reconnect_initial_seconds
             while not self.stop_event.is_set():
@@ -288,6 +393,17 @@ class PortableVoiceClient:
                         break
                 connected_at = asyncio.get_running_loop().time()
                 connection_error: Optional[Exception] = None
+                self._counters["connection_attempts"] += 1
+                if self._counters["connection_attempts"] > 1:
+                    self._counters["reconnect_attempts"] += 1
+                    self._observe(
+                        "reconnect_started",
+                        retry_delay_ms=round(delay * 1000, 1),
+                    )
+                self._observe(
+                    "connection_attempt",
+                    attempt=self._counters["connection_attempts"],
+                )
                 try:
                     await self._run_connection()
                 except asyncio.CancelledError:
@@ -322,6 +438,7 @@ class PortableVoiceClient:
                 await self._reset_connection_state(report_failure=False)
             finally:
                 await self.audio.stop()
+                self._observe("carrier_stopped", counters=self.metrics_snapshot())
 
     async def _run_connection(self) -> None:
         import websockets
@@ -345,7 +462,15 @@ class PortableVoiceClient:
                         "server did not accept the device voice protocol"
                     )
                 self.websocket = websocket
+                self._discard_input_buffer()
                 self.connected_event.set()
+                self._counters["successful_connections"] += 1
+                self._observe(
+                    "socket_connected",
+                    connection=self._counters["successful_connections"],
+                )
+                if self._counters["successful_connections"] > 1:
+                    self._observe("reconnect_completed")
                 print("[carrier] connected; listening")
                 sender = asyncio.create_task(
                     self._send_microphone(websocket),
@@ -380,6 +505,8 @@ class PortableVoiceClient:
                     if exception is not None:
                         raise exception
         finally:
+            if self.websocket is not None:
+                self._observe("socket_disconnected")
             await self._reset_connection_state(report_failure=False)
 
     async def _send_microphone(self, websocket) -> None:
@@ -393,6 +520,8 @@ class PortableVoiceClient:
                 )
             async with self._send_lock:
                 await websocket.send(payload)
+            self._counters["uplink_frames"] += 1
+            self._counters["uplink_bytes"] += len(payload)
 
     async def _receive_server(self, websocket) -> None:
         async for item in websocket:
@@ -423,10 +552,19 @@ class PortableVoiceClient:
                 if not self.session_id:
                     self._clear_session_observations()
                     self.session_id = session_id
+                    self._observe(
+                        "session_started",
+                        audio_format=payload.get("audio_format"),
+                        audio_sample_rate=payload.get("audio_sample_rate"),
+                    )
             elif not self.session_id:
                 raise RuntimeError("server sent runtime status before negotiation")
             elif payload.get("status") in {"ready", "reconnected"}:
                 self.provider_ready_event.set()
+                self._observe(
+                    "provider_ready",
+                    provider_status=payload.get("status"),
+                )
             return
         if not self._message_matches_current_session(payload):
             if message_type == "audio_chunk":
@@ -451,12 +589,25 @@ class PortableVoiceClient:
             if turn_id and not self._accept_turn(turn_id, allow_new=True):
                 return
             self.last_final_text = str(payload.get("text") or "")
+            self.final_text_event.set()
+            self._observe("speech_finalized_received")
             return
         if message_type == "reply":
             turn_id = str(payload.get("turn_id") or "")
             if turn_id and not self._accept_turn(turn_id, allow_new=False):
                 return
             self.last_reply_text = str(payload.get("reply") or "")
+            self.reply_text_event.set()
+            self._observe("reply_completed_received")
+            return
+        if message_type == "turn_metrics":
+            self.last_turn_metrics = dict(payload)
+            self.turn_metrics_event.set()
+            self._observe(
+                "turn_metrics_received",
+                turn_status=payload.get("status"),
+                timings=payload.get("timings"),
+            )
             return
         if message_type == "audio_chunk":
             if self.pending_binary is not None:
@@ -544,8 +695,36 @@ class PortableVoiceClient:
         if stream is None or descriptor.chunk_index != stream.next_chunk_index:
             raise RuntimeError("audio chunk state changed before binary frame")
         stream.next_chunk_index += 1
-        await self._playback_queue.put(
-            (self._playback_generation, descriptor, bytes(payload))
+        self._counters["downlink_frames"] += 1
+        self._counters["downlink_bytes"] += len(payload)
+        if descriptor.audio_id not in self._received_audio_ids:
+            self._received_audio_ids.add(descriptor.audio_id)
+            self._observe(
+                "first_audio_received",
+                audio_id=descriptor.audio_id,
+                chunk_count=descriptor.chunk_count,
+                chunk_bytes=len(payload),
+            )
+        try:
+            self._playback_queue.put_nowait((
+                self._playback_generation,
+                time.monotonic(),
+                descriptor,
+                bytes(payload),
+            ))
+        except asyncio.QueueFull as exc:
+            self._counters["playback_overflows"] += 1
+            self._counters["playback_dropped_frames"] += 1
+            self._observe(
+                "playback_queue_overflow",
+                audio_id=descriptor.audio_id,
+                queue_capacity=PLAYBACK_QUEUE_CAPACITY,
+            )
+            await self._fail_active_audio("playback_queue_overflow")
+            raise RuntimeError("playback queue is full") from exc
+        self._counters["playback_max_queue_depth"] = max(
+            self._counters["playback_max_queue_depth"],
+            self._playback_queue.qsize(),
         )
         self._ensure_playback_worker()
         await asyncio.sleep(0)
@@ -636,12 +815,16 @@ class PortableVoiceClient:
         try:
             while True:
                 try:
-                    generation, descriptor, payload = (
+                    generation, enqueued_at, descriptor, payload = (
                         self._playback_queue.get_nowait()
                     )
                 except asyncio.QueueEmpty:
                     return
                 try:
+                    self._counters["playback_max_queue_wait_ms"] = max(
+                        self._counters["playback_max_queue_wait_ms"],
+                        round((time.monotonic() - enqueued_at) * 1000, 3),
+                    )
                     if (
                         generation != self._playback_generation
                         or self._audio_is_cancelled(descriptor)
@@ -654,6 +837,10 @@ class PortableVoiceClient:
                             "playback_started",
                         )
                         self.started_audio_ids.add(descriptor.audio_id)
+                        self._observe(
+                            "audio_output_started",
+                            audio_id=descriptor.audio_id,
+                        )
                     await self.audio.play(payload)
                     if (
                         generation != self._playback_generation
@@ -667,6 +854,10 @@ class PortableVoiceClient:
                         )
                         self.last_completed_audio_id = descriptor.audio_id
                         self.playback_completed_event.set()
+                        self._observe(
+                            "audio_output_completed",
+                            audio_id=descriptor.audio_id,
+                        )
                         self.completed_audio_ids.add(descriptor.audio_id)
                         self.active_audio_ids.pop(descriptor.audio_id, None)
                         self.audio_streams.pop(descriptor.audio_id, None)
@@ -701,13 +892,16 @@ class PortableVoiceClient:
         if task is not None and task is not asyncio.current_task() and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        dropped_frames = 0
         while True:
             try:
                 self._playback_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
             else:
+                dropped_frames += 1
                 self._playback_queue.task_done()
+        self._counters["playback_dropped_frames"] += dropped_frames
         try:
             await self.audio.stop_playback()
         except Exception as exc:
@@ -781,6 +975,7 @@ class PortableVoiceClient:
             await self._reset_playback(report_failure=False)
         self.websocket = None
         self.connected_event.clear()
+        self._discard_input_buffer()
         self.session_id = ""
         self._clear_session_observations()
 
@@ -795,9 +990,14 @@ class PortableVoiceClient:
         self.cancelled_audio_ids.clear()
         self.last_final_text = ""
         self.last_reply_text = ""
+        self.last_turn_metrics = {}
         self.last_completed_audio_id = ""
+        self.final_text_event.clear()
+        self.reply_text_event.clear()
+        self.turn_metrics_event.clear()
         self.playback_completed_event.clear()
         self.provider_ready_event.clear()
+        self._received_audio_ids.clear()
 
 
 async def _keyboard_control(client: PortableVoiceClient) -> None:

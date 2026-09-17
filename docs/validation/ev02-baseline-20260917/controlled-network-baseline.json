@@ -1,0 +1,160 @@
+{
+  "created_at": "2026-09-17T07:57:53.535195+00:00",
+  "environment": "loopback WebSocket with controlled service impairment",
+  "transport": "websocket",
+  "profile_id": "ws-pcm-s16le-v1",
+  "scope": "Real WebSocket/reconnect/client tasks with fake audio and no provider calls; not an RF or internet packet-loss test.",
+  "scenarios": [
+    {
+      "name": "stable_loopback",
+      "passed": true,
+      "response_delay_ms": 0,
+      "chunk_intervals_ms": [
+        0,
+        0,
+        0
+      ],
+      "queued_to_first_audio_ms": 0.6,
+      "queued_to_playback_complete_ms": 0.9,
+      "received_chunks": 3,
+      "client_counters": {
+        "connection_attempts": 1,
+        "successful_connections": 1,
+        "uplink_frames": 1,
+        "uplink_bytes": 640,
+        "downlink_frames": 3,
+        "downlink_bytes": 1920,
+        "dropped_input_frames": 0,
+        "reconnect_attempts": 0,
+        "input_overflows": 0,
+        "input_queue_overflows": 0,
+        "playback_underruns": 0,
+        "playback_overflows": null,
+        "session_id": "SESSION-1-e19e5cb8",
+        "turn_id": "TURN-6dce07b7",
+        "active_audio_count": 0,
+        "queued_audio_frames": 0
+      },
+      "receipt_sequence": [
+        "decoded",
+        "playback_started",
+        "playback_completed"
+      ]
+    },
+    {
+      "name": "fixed_100ms",
+      "passed": true,
+      "response_delay_ms": 100,
+      "chunk_intervals_ms": [
+        0,
+        0,
+        0
+      ],
+      "queued_to_first_audio_ms": 101.9,
+      "queued_to_playback_complete_ms": 102.2,
+      "received_chunks": 3,
+      "client_counters": {
+        "connection_attempts": 1,
+        "successful_connections": 1,
+        "uplink_frames": 1,
+        "uplink_bytes": 640,
+        "downlink_frames": 3,
+        "downlink_bytes": 1920,
+        "dropped_input_frames": 0,
+        "reconnect_attempts": 0,
+        "input_overflows": 0,
+        "input_queue_overflows": 0,
+        "playback_underruns": 0,
+        "playback_overflows": null,
+        "session_id": "SESSION-1-f8097ce7",
+        "turn_id": "TURN-66decfd0",
+        "active_audio_count": 0,
+        "queued_audio_frames": 0
+      },
+      "receipt_sequence": [
+        "decoded",
+        "playback_started",
+        "playback_completed"
+      ]
+    },
+    {
+      "name": "jitter_100_120_10_80ms",
+      "passed": true,
+      "response_delay_ms": 100,
+      "chunk_intervals_ms": [
+        0,
+        120,
+        10,
+        80
+      ],
+      "queued_to_first_audio_ms": 101.7,
+      "queued_to_playback_complete_ms": 316.2,
+      "received_chunks": 4,
+      "client_counters": {
+        "connection_attempts": 1,
+        "successful_connections": 1,
+        "uplink_frames": 1,
+        "uplink_bytes": 640,
+        "downlink_frames": 4,
+        "downlink_bytes": 2560,
+        "dropped_input_frames": 0,
+        "reconnect_attempts": 0,
+        "input_overflows": 0,
+        "input_queue_overflows": 0,
+        "playback_underruns": 0,
+        "playback_overflows": null,
+        "session_id": "SESSION-1-d945de7f",
+        "turn_id": "TURN-ad913d47",
+        "active_audio_count": 0,
+        "queued_audio_frames": 0
+      },
+      "receipt_sequence": [
+        "decoded",
+        "playback_started",
+        "playback_completed"
+      ]
+    },
+    {
+      "name": "thirty_second_outage",
+      "passed": true,
+      "requested_outage_seconds": 30.0,
+      "actual_outage_seconds": 30.026,
+      "new_session": true,
+      "frames_received_before_new_input": 0,
+      "offline_frames_uploaded_after_reconnect": 0,
+      "post_recovery_frame_received": true,
+      "client_counters": {
+        "connection_attempts": 6,
+        "successful_connections": 2,
+        "uplink_frames": 2,
+        "uplink_bytes": 1280,
+        "downlink_frames": 0,
+        "downlink_bytes": 0,
+        "dropped_input_frames": 10,
+        "reconnect_attempts": 5,
+        "input_overflows": 0,
+        "input_queue_overflows": 0,
+        "playback_underruns": 0,
+        "playback_overflows": null,
+        "session_id": "SESSION-1-f702a05a",
+        "turn_id": null,
+        "active_audio_count": 0,
+        "queued_audio_frames": 0
+      },
+      "observation_events": [
+        "socket_connected",
+        "session_started",
+        "socket_disconnected",
+        "reconnect_started",
+        "reconnect_started",
+        "reconnect_started",
+        "reconnect_started",
+        "reconnect_started",
+        "socket_connected",
+        "reconnect_completed",
+        "session_started"
+      ]
+    }
+  ],
+  "passed": true
+}

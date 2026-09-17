@@ -68,12 +68,19 @@ async def _run_device_turn(
 ) -> dict:
     import websockets
 
+    loop = asyncio.get_running_loop()
+    connection_started = loop.time()
     uri = f"ws://127.0.0.1:{port}/api/asr/device-stream"
     messages: list[dict] = []
     pcm_output = bytearray()
     pending: dict | None = None
     started: set[str] = set()
     completed: set[str] = set()
+    client_marks: dict[str, float] = {}
+    server_speaking = asyncio.Event()
+    uplink_frames = 0
+    uplink_bytes = 0
+    downlink_frames = 0
 
     async with websockets.connect(
         uri,
@@ -82,52 +89,100 @@ async def _run_device_turn(
         max_size=2 * 1024 * 1024,
     ) as websocket:
         status = json.loads(await asyncio.wait_for(websocket.recv(), timeout=10))
+        client_marks["socket_ready"] = loop.time()
         if status.get("type") != "status" or status.get("audio_format") != "pcm":
             raise AssertionError(f"unexpected device status: {status}")
 
-        for offset in range(0, len(input_pcm), 640):
-            await websocket.send(input_pcm[offset:offset + 640])
-            await asyncio.sleep(0.02)
-        for _ in range(100):
-            await websocket.send(b"\x00" * 640)
-            await asyncio.sleep(0.02)
+        send_lock = asyncio.Lock()
 
-        deadline = asyncio.get_running_loop().time() + 60
-        while asyncio.get_running_loop().time() < deadline:
-            item = await asyncio.wait_for(websocket.recv(), timeout=10)
-            if isinstance(item, bytes):
-                if pending is None:
-                    raise AssertionError("binary frame lacks audio_chunk metadata")
-                pcm_output.extend(item)
-                audio_id = str(pending["audio_id"])
-                receipt = {
-                    "type": "audio_playback",
-                    "session_id": pending["session_id"],
-                    "turn_id": pending["turn_id"],
-                    "audio_id": audio_id,
-                }
-                if audio_id not in started:
-                    for stage in ("decoded", "playback_started"):
-                        await websocket.send(
-                            json.dumps({**receipt, "stage": stage})
+        async def send(payload) -> None:
+            async with send_lock:
+                await websocket.send(payload)
+
+        async def receive_until_complete() -> None:
+            nonlocal pending, downlink_frames
+            deadline = loop.time() + 60
+            while loop.time() < deadline:
+                item = await asyncio.wait_for(websocket.recv(), timeout=10)
+                if isinstance(item, bytes):
+                    if pending is None:
+                        raise AssertionError(
+                            "binary frame lacks audio_chunk metadata"
                         )
-                    started.add(audio_id)
-                if pending["chunk_index"] == pending["chunk_count"] - 1:
-                    await websocket.send(
-                        json.dumps({**receipt, "stage": "playback_completed"})
-                    )
-                    completed.add(audio_id)
-                pending = None
-                continue
+                    downlink_frames += 1
+                    client_marks.setdefault("first_audio_received", loop.time())
+                    pcm_output.extend(item)
+                    audio_id = str(pending["audio_id"])
+                    receipt = {
+                        "type": "audio_playback",
+                        "session_id": pending["session_id"],
+                        "turn_id": pending["turn_id"],
+                        "audio_id": audio_id,
+                    }
+                    if audio_id not in started:
+                        for stage in ("decoded", "playback_started"):
+                            await send(json.dumps({**receipt, "stage": stage}))
+                        started.add(audio_id)
+                    if pending["chunk_index"] == pending["chunk_count"] - 1:
+                        await send(json.dumps({
+                            **receipt,
+                            "stage": "playback_completed",
+                        }))
+                        completed.add(audio_id)
+                    pending = None
+                    continue
 
-            message = json.loads(item)
-            messages.append(message)
-            if message.get("type") == "audio_chunk":
-                pending = message
-            if message.get("type") == "turn_metrics":
-                break
-        else:
+                message = json.loads(item)
+                messages.append(message)
+                message_type = message.get("type")
+                if message_type == "final":
+                    client_marks.setdefault("final_received", loop.time())
+                elif message_type == "speaking":
+                    if message.get("status") == "start":
+                        server_speaking.set()
+                    else:
+                        server_speaking.clear()
+                elif message_type == "reply":
+                    client_marks.setdefault("reply_received", loop.time())
+                elif message_type == "turn_metrics":
+                    client_marks.setdefault(
+                        "turn_metrics_received",
+                        loop.time(),
+                    )
+                if message_type == "audio_chunk":
+                    pending = message
+                if message_type == "turn_metrics":
+                    return
             raise TimeoutError("device turn did not complete")
+
+        receiver_task = asyncio.create_task(
+            receive_until_complete(),
+            name="lingou-live-device-receiver",
+        )
+        try:
+            client_marks["input_started"] = loop.time()
+            for offset in range(0, len(input_pcm), 640):
+                if server_speaking.is_set():
+                    break
+                frame = input_pcm[offset:offset + 640]
+                await send(frame)
+                uplink_frames += 1
+                uplink_bytes += len(frame)
+                await asyncio.sleep(0.02)
+            for _ in range(100):
+                if server_speaking.is_set():
+                    break
+                frame = b"\x00" * 640
+                await send(frame)
+                uplink_frames += 1
+                uplink_bytes += len(frame)
+                await asyncio.sleep(0.02)
+            client_marks["input_finished"] = loop.time()
+            await asyncio.wait_for(receiver_task, timeout=65)
+        finally:
+            if not receiver_task.done():
+                receiver_task.cancel()
+                await asyncio.gather(receiver_task, return_exceptions=True)
 
     final = next((item for item in messages if item.get("type") == "final"), None)
     reply = next((item for item in messages if item.get("type") == "reply"), None)
@@ -143,6 +198,15 @@ async def _run_device_turn(
         raise AssertionError("device received invalid PCM")
     if not metrics or metrics.get("status") != "completed":
         raise AssertionError(f"turn did not complete: {metrics}")
+    input_origin = client_marks["input_started"]
+    client_timings_ms = {
+        name + "_ms": round((value - input_origin) * 1000, 1)
+        for name, value in client_marks.items()
+    }
+    client_timings_ms["connection_setup_ms"] = round(
+        (client_marks["socket_ready"] - connection_started) * 1000,
+        1,
+    )
     return {
         "asr_text": final["text"],
         "reply_text": reply["reply"],
@@ -150,6 +214,13 @@ async def _run_device_turn(
         "audio_ids_completed": len(completed),
         "turn_status": metrics["status"],
         "client_kind": status.get("client_kind"),
+        "session_id": status.get("session_id"),
+        "turn_id": metrics.get("turn_id"),
+        "server_timings_ms": metrics.get("timings", {}),
+        "client_timings_ms": client_timings_ms,
+        "uplink_frames": uplink_frames,
+        "uplink_bytes": uplink_bytes,
+        "downlink_frames": downlink_frames,
     }
 
 

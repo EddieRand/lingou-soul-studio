@@ -19,6 +19,10 @@
 
 ## 协议
 
+当前运行时协议和未来媒体能力协商的完整规范见
+[`device-voice-protocol-v1.md`](device-voice-protocol-v1.md)。EV-01 只冻结设计合同；
+当前服务端、替代载体和参考固件仍只启用兼容的 PCM profile。
+
 客户端为：
 
 `hardware_adapter/portable_voice_client.py`
@@ -49,6 +53,11 @@ Sec-WebSocket-Protocol: lingou.device.voice.v1
 `chunk_count` 和连续 `chunk_index`。播放回执按
 `decoded -> playback_started -> playback_completed|playback_failed` 顺序发送。
 取消后的迟到描述符和二进制帧只被消费，不再播放或回报完成。
+
+载体在断线和新连接建立时清空尚未发送的麦克风队列，避免把离线期间的旧语音发送到
+新 session。可选 `observation_sink` 使用单调时钟记录连接、首音频、播放、重连和
+帧计数，不包含凭据或对话正文。EV-02 的基线和修复前后证据见
+[`validation/ev02-baseline-20260917/README.md`](validation/ev02-baseline-20260917/README.md)。
 
 ## 安装
 
@@ -104,6 +113,9 @@ set +a
 - 交互终端按回车：打断当前回复；如被 H5 替换，则恢复设备会话。
 - 无终端环境发送 `SIGUSR1`：执行相同操作。
 - `SIGINT` / `SIGTERM`：释放麦克风、扬声器和 WebSocket 后退出。
+- 下行播放队列固定为 8 帧；慢播放导致队列满时，当前音频明确失败并清空，不阻塞
+  `stop_audio` 或其他控制消息。
+- 观测快照包含播放溢出、丢帧、最大队列深度和最大排队时长。
 
 ## 自动启动
 
