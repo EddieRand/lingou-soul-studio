@@ -18,7 +18,7 @@ audio identity. Those remain server-owned.
 
 | Port | Responsibility |
 |---|---|
-| microphone | Fixed 16 kHz mono s16le capture frames |
+| microphone | Fixed 16 kHz mono s16le capture and acoustic-front-end output |
 | speaker | Fixed 24 kHz mono s16le output and immediate abort |
 | indicator | Product state to LED or local indicator |
 | inputs | Touch, pressure, button and reset events |
@@ -59,7 +59,7 @@ EV-03 freezes initial budgets, not measured utilization:
 | Task | Priority | Stack budget | Queue | Core | Overflow |
 |---|---:|---:|---:|---:|---|
 | `lingou_control` | 8 | 4096 B | 32 | 0 | reject new |
-| `lingou_capture` | 7 | 4096 B | 12 | 1 | drop oldest |
+| `lingou_capture` | 7 | 8192 B | 12 | 1 | drop oldest |
 | `lingou_playback` | 7 | 4096 B | 8 | 1 | reject new |
 | `lingou_network` | 6 | 6144 B | 24 | 0 | reject new |
 | `lingou_diagnostics` | 2 | 3072 B | 64 | 0 | drop oldest |
@@ -71,6 +71,12 @@ EV-04 implements these budgets with fixed slot pools. Capture keeps the newest
 20 ms input when the network consumer falls behind. Playback never waits for
 queue space in the WebSocket callback; saturation fails and clears the affected
 audio generation instead of delaying control traffic.
+
+EV-05 keeps AEC, NS, AGC, playback-reference conversion and clipping control
+inside the microphone-side hardware adapter. The capture task stack budget is
+raised to 8192 bytes for ESP-SR calls; this remains a budget until target
+high-water data is recorded. See
+[`acoustic-frontend.md`](acoustic-frontend.md).
 
 ## DNESP32S3 Profile
 

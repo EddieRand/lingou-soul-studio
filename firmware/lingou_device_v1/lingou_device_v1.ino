@@ -24,6 +24,8 @@
 #define LINGOU_SERVER_CA_CERT ""
 #endif
 
+#include "hal/esp_sr_acoustic_frontend.h"
+
 using namespace lingou::boards::dnesp32s3;
 
 constexpr i2s_port_t SPK_I2S_PORT = I2S_NUM_0;
@@ -119,7 +121,9 @@ CaptureSlot captureSlots[CAPTURE_SLOT_COUNT];
 PlaybackSlot playbackSlots[PLAYBACK_SLOT_COUNT];
 ActiveAudioState activeAudio[PLAYBACK_SLOT_COUNT];
 int32_t micInput[MIC_FRAME_SAMPLES];
+int16_t micPcm[MIC_FRAME_SAMPLES];
 int16_t speakerStereo[SPEAKER_BLOCK_SAMPLES * 2];
+lingou::hal::EspSrAcousticFrontend acousticFrontend;
 
 QueueHandle_t freeCaptureSlots = nullptr;
 QueueHandle_t capturedFrames = nullptr;
@@ -273,6 +277,7 @@ void localServiceAlert() {
   }
   lastLocalAlertAt = now;
   setRing(48, 8, 0);
+  acousticFrontend.BeginPlayback(playbackGeneration);
   queueLocalTone(330, 120);
   queueLocalTone(220, 180);
 }
@@ -464,6 +469,8 @@ void stopRemotePlayback(
   playbackActive = false;
   clearPlaybackFrames();
   setIdleOutputLow();
+  acousticFrontend.Reset(playbackGeneration);
+  clearCapturedFrames();
   serverSpeaking = false;
   resetPendingAudioDescriptor();
   currentTurnId = "";
@@ -550,6 +557,9 @@ uint8_t writeStereoSamples(
       return SPEAKER_WRITE_FAILED;
     }
     writtenTotal += written;
+  }
+  if (generation == playbackGeneration) {
+    acousticFrontend.PushPlayback24k(mono, sampleCount, generation);
   }
   return SPEAKER_WRITE_COMPLETE;
 }
@@ -662,7 +672,7 @@ void captureAudioTask(void*) {
     if (
       error != ESP_OK
       || !socketConnected
-      || serverSpeaking
+      || (serverSpeaking && !acousticFrontend.Active())
       || pausedForReplacement
     ) {
       accumulatedBytes = 0;
@@ -673,6 +683,21 @@ void captureAudioTask(void*) {
       continue;
     }
     accumulatedBytes = 0;
+
+    for (size_t index = 0; index < MIC_FRAME_SAMPLES; ++index) {
+      int32_t value = micInput[index] >> 13;
+      value = constrain(value, -32768, 32767);
+      micPcm[index] = static_cast<int16_t>(value);
+    }
+    const size_t processedSamples = acousticFrontend.ProcessMicrophone16k(
+      micPcm,
+      MIC_FRAME_SAMPLES,
+      micPcm,
+      MIC_FRAME_SAMPLES
+    );
+    if (processedSamples != MIC_FRAME_SAMPLES) {
+      continue;
+    }
 
     uint8_t slotIndex = 0;
     if (xQueueReceive(freeCaptureSlots, &slotIndex, 0) != pdTRUE) {
@@ -685,16 +710,10 @@ void captureAudioTask(void*) {
     }
 
     CaptureSlot& slot = captureSlots[slotIndex];
-    int16_t* output = reinterpret_cast<int16_t*>(slot.payload);
-    for (size_t index = 0; index < MIC_FRAME_SAMPLES; ++index) {
-      int32_t value = micInput[index] >> 13;
-      value *= 2;
-      value = constrain(value, -32768, 32767);
-      output[index] = static_cast<int16_t>(value);
-    }
+    memcpy(slot.payload, micPcm, processedSamples * sizeof(int16_t));
     slot.sequence = ++captureSequence;
     slot.enqueued_at_ms = millis();
-    slot.length = sizeof(slot.payload);
+    slot.length = processedSamples * sizeof(int16_t);
     if (xQueueSend(capturedFrames, &slotIndex, 0) != pdTRUE) {
       releaseCaptureSlot(slotIndex);
       incrementMetric(&audioMetrics.capture_overflows);
@@ -744,6 +763,12 @@ void playbackAudioTask(void*) {
     ) {
       playbackFaultGeneration = slot.generation;
     }
+    if (
+      slot.kind == PlaybackSlotKind::kLocalTone
+      && uxQueueMessagesWaiting(playbackFrames) == 0
+    ) {
+      acousticFrontend.EndPlayback(slot.generation);
+    }
     releasePlaybackSlot(slotIndex);
   }
 }
@@ -779,7 +804,7 @@ bool setupAudioPipeline() {
   const BaseType_t captureCreated = xTaskCreatePinnedToCore(
     captureAudioTask,
     "lingou_capture",
-    4096,
+    8192,
     nullptr,
     7,
     &captureTaskHandle,
@@ -894,6 +919,7 @@ void processPlaybackEvents() {
         removeActiveAudio(event.identity);
         if (!hasActiveAudio() && uxQueueMessagesWaiting(playbackFrames) == 0) {
           serverSpeaking = false;
+          acousticFrontend.EndPlayback(event.generation);
           setRing(18, 0, 18);
         }
         break;
@@ -902,7 +928,11 @@ void processPlaybackEvents() {
 }
 
 void streamQueuedMicrophoneFrames() {
-  if (!socketConnected || serverSpeaking || pausedForReplacement) {
+  if (
+    !socketConnected
+    || (serverSpeaking && !acousticFrontend.Active())
+    || pausedForReplacement
+  ) {
     clearCapturedFrames();
     return;
   }
@@ -951,6 +981,28 @@ void printAudioTelemetry() {
     static_cast<unsigned long>(snapshot.playback_event_drops),
     static_cast<unsigned long>(snapshot.playback_max_depth),
     static_cast<unsigned long>(snapshot.playback_max_wait_ms)
+  );
+  const lingou::hal::AcousticFrontendMetrics acoustic = (
+    acousticFrontend.Snapshot()
+  );
+  Serial.printf(
+    "ACOUSTIC_FRONTEND profile=%s enabled=%u active=%u aec_frame=%d "
+    "input_frames=%lu output_frames=%lu aec_blocks=%lu clipped=%lu "
+    "ref_overflow=%lu ref_underflow=%lu processed_overflow=%lu "
+    "failures=%lu ref_max_depth=%lu\n",
+    acousticFrontend.ProfileVersion(),
+    acoustic.enabled,
+    acoustic.active,
+    acoustic.aec_frame_samples,
+    static_cast<unsigned long>(acoustic.input_frames),
+    static_cast<unsigned long>(acoustic.output_frames),
+    static_cast<unsigned long>(acoustic.aec_blocks),
+    static_cast<unsigned long>(acoustic.clipped_samples),
+    static_cast<unsigned long>(acoustic.reference_overflow_samples),
+    static_cast<unsigned long>(acoustic.reference_underflow_samples),
+    static_cast<unsigned long>(acoustic.processed_overflow_samples),
+    static_cast<unsigned long>(acoustic.processing_failures),
+    static_cast<unsigned long>(acoustic.reference_max_depth)
   );
 }
 
@@ -1012,8 +1064,13 @@ void handleServerText(uint8_t* payload, size_t length) {
       if (turnId.length()) {
         currentTurnId = turnId;
       }
+      if (!serverSpeaking) {
+        acousticFrontend.BeginPlayback(playbackGeneration);
+      }
       serverSpeaking = true;
-      clearCapturedFrames();
+      if (!acousticFrontend.Active()) {
+        clearCapturedFrames();
+      }
     } else if (
       (!turnId.length() || turnId == currentTurnId)
       && !hasActiveAudio()
@@ -1091,8 +1148,13 @@ void handleServerText(uint8_t* payload, size_t length) {
     pendingChunkCount = document["chunk_count"] | 0;
     pendingChunkLength = chunkLength;
     currentTurnId = turnId;
+    if (!serverSpeaking) {
+      acousticFrontend.BeginPlayback(playbackGeneration);
+    }
     serverSpeaking = true;
-    clearCapturedFrames();
+    if (!acousticFrontend.Active()) {
+      clearCapturedFrames();
+    }
     return;
   }
   if (type == "stop_audio" || type == "turn_cancelled") {
@@ -1264,7 +1326,11 @@ void setup() {
 
   setupSpeakerI2S();
   setupMicrophoneI2S();
-  audioPipelineReady = setupAudioPipeline();
+  const lingou::hal::AcousticFrontendConfig acousticConfig = (
+    lingou::hal::BuildAcousticFrontendConfig()
+  );
+  const bool acousticReady = acousticFrontend.Start(acousticConfig);
+  audioPipelineReady = acousticReady && setupAudioPipeline();
   showBootVersionSignal();
 
   Serial.println("LINGOU_DEVICE_FIRMWARE=lingou-device-v1");
@@ -1273,6 +1339,26 @@ void setup() {
     "AUDIO_PIPELINE_CONFIG=capture:%u,playback:%u,abort_ms:40\n",
     CAPTURE_SLOT_COUNT,
     PLAYBACK_SLOT_COUNT
+  );
+  Serial.printf(
+    "ACOUSTIC_FRONTEND_CONFIG=profile:%s,requested:%u,active:%u,"
+    "status:%s\n",
+    acousticFrontend.ProfileVersion(),
+    acousticConfig.enabled,
+    acousticFrontend.Active(),
+    acousticFrontend.FailureReason()
+  );
+  Serial.printf(
+    "ACOUSTIC_FRONTEND_TUNING=aec_filter:%d,reference_delay_ms:%d,"
+    "mic_gain_q8:%d,clip_limit:%d,ns_mode:%d,agc_gain_db:%d,"
+    "agc_target_dbfs:%d\n",
+    acousticConfig.aec_filter_length,
+    acousticConfig.reference_delay_ms,
+    acousticConfig.microphone_gain_q8,
+    acousticConfig.clip_limit,
+    acousticConfig.ns_mode,
+    acousticConfig.agc_gain_db,
+    acousticConfig.agc_target_dbfs
   );
   if (!audioPipelineReady) {
     Serial.println("DEVICE_CONFIG_ERROR=AUDIO_PIPELINE_INIT_FAILED");

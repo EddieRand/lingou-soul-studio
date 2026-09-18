@@ -62,12 +62,13 @@ DEVICE_TASK_MODEL = (
         role=TaskRole.AUDIO_CAPTURE,
         name="lingou_capture",
         priority=7,
-        stack_budget_bytes=4096,
+        stack_budget_bytes=8192,
         queue_capacity=12,
         overflow_policy=QueueOverflowPolicy.DROP_OLDEST,
         core_affinity=1,
         responsibility=(
-            "Read fixed 20 ms microphone frames and hand them to media transport."
+            "Read fixed microphone frames, run the acoustic front end and "
+            "hand 20 ms output frames to media transport."
         ),
     ),
     TaskSpec(

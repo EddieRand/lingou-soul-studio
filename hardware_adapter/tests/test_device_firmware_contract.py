@@ -83,13 +83,19 @@ class DeviceFirmwareContractTests(unittest.TestCase):
         self.assertNotIn("owner_user_id", self.board_profile)
         self.assertNotIn("device_credential", self.board_profile.lower())
 
-    def test_idle_output_is_zeroed_and_capture_task_mutes_microphone(self):
+    def test_capture_during_playback_requires_active_acoustic_frontend(self):
         self.assertIn("i2s_zero_dma_buffer(SPK_I2S_PORT)", self.source)
         self.assertIn("void captureAudioTask(void*)", self.source)
-        self.assertRegex(
+        self.assertGreaterEqual(
+            len(re.findall(
+                r"serverSpeaking\s*&&\s*!acousticFrontend\.Active\(\)",
+                self.source,
+            )),
+            2,
+        )
+        self.assertIn(
+            "acousticFrontend.ProcessMicrophone16k(",
             self.source,
-            r"!socketConnected\s*\|\|\s*serverSpeaking"
-            r"\s*\|\|\s*pausedForReplacement",
         )
 
     def test_audio_pipeline_uses_bounded_slot_queues_and_dedicated_tasks(self):

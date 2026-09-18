@@ -171,6 +171,7 @@ cd services/companion-server
 - **语音基线证据**: [docs/validation/ev02-baseline-20260917/README.md](docs/validation/ev02-baseline-20260917/README.md) - EV-02 真实延迟、声学和 30 秒恢复结果
 - **硬件 HAL**: [docs/hardware-hal.md](docs/hardware-hal.md) - EV-03 端口、生命周期、任务模型和板级隔离
 - **非阻塞音频流水线**: [docs/validation/ev04-audio-pipeline-20260917/README.md](docs/validation/ev04-audio-pipeline-20260917/README.md) - EV-04 有界采播、取消隔离和待补实物证据
+- **声学前端**: [docs/acoustic-frontend.md](docs/acoustic-frontend.md) - EV-05 ESP-SR AEC、NS、AGC 配置和声学验收
 - **API 文档**: [API.md](API.md) - 完整接口说明
 - **身份边界**: [docs/authentication.md](docs/authentication.md) - Bearer、WebSocket 票据与测试设备身份
 - **数据归属**: [docs/data-ownership.md](docs/data-ownership.md) - owner 规则与离线迁移流程

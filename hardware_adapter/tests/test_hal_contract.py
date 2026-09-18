@@ -258,6 +258,7 @@ class DeviceHALContractTests(unittest.IsolatedAsyncioTestCase):
         capture = by_role[TaskRole.AUDIO_CAPTURE]
         playback = by_role[TaskRole.AUDIO_PLAYBACK]
         self.assertEqual(capture.queue_capacity, 12)
+        self.assertEqual(capture.stack_budget_bytes, 8192)
         self.assertEqual(
             capture.overflow_policy,
             QueueOverflowPolicy.DROP_OLDEST,
@@ -310,6 +311,7 @@ class DeviceHALContractTests(unittest.IsolatedAsyncioTestCase):
 
     def test_generic_hal_has_no_server_core_or_gpio_dependencies(self):
         generic_files = (
+            PROJECT_ROOT / "hardware_adapter" / "hal" / "acoustic_profile.py",
             PROJECT_ROOT / "hardware_adapter" / "hal" / "contracts.py",
             PROJECT_ROOT / "hardware_adapter" / "hal" / "lifecycle.py",
             PROJECT_ROOT / "hardware_adapter" / "hal" / "task_model.py",

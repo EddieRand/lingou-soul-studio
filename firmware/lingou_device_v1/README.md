@@ -12,6 +12,12 @@ the firmware-side port boundaries in
 capture/playback slot pools and dedicated FreeRTOS audio tasks so WebSocket
 callbacks never write I2S directly.
 
+EV-05 adds an opt-in ESP-SR 2.4.6 acoustic front end in
+[`hal/esp_sr_acoustic_frontend.h`](hal/esp_sr_acoustic_frontend.h). It combines
+full-duplex low-cost AEC, WebRTC noise suppression and digital AGC. See
+[`docs/acoustic-frontend.md`](../../docs/acoustic-frontend.md) for the signal
+path and target acceptance matrix.
+
 | Function | GPIO |
 |---|---|
 | WS2812B ring | 18 |
@@ -65,6 +71,16 @@ ARDUINO_CLI="/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/re
   firmware/lingou_device_v1
 ```
 
+The checked-in configuration keeps ESP-SR disabled. An EV-05 target build must
+set `LINGOU_ENABLE_ESP_SR_AFE=1` in the ignored `device_config.h` and use the
+N16R8 profile:
+
+```bash
+"$ARDUINO_CLI" compile \
+  --fqbn esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi \
+  firmware/lingou_device_v1
+```
+
 Select the actual DNESP32S3 serial port when uploading. Do not upload while
 the board is absent or while another serial monitor owns the port.
 
@@ -85,18 +101,23 @@ the board is absent or while another serial monitor owns the port.
   cancels the original server turn. The local abort path invalidates the old
   generation and clears DMA before sending network receipts, with a 40 ms
   software lock timeout.
-- During playback the microphone is muted because this hardware revision has
-  no validated acoustic echo cancellation. The heavy press is the reliable
-  interruption mechanism for this MVP.
+- With ESP-SR disabled, playback mutes the microphone and the heavy press is
+  the reliable interruption mechanism.
+- With ESP-SR enabled and initialized, microphone capture remains active during
+  playback. The 24 kHz speaker PCM is converted to a delayed 16 kHz digital
+  reference for AEC before NS and AGC process the uplink.
 - Wi-Fi, server and audio failures use a red/amber ring and local two-tone
   prompt. Recovery reconnects to a fresh voice session; queued replies are not
   replayed.
 - When idle, the I2S DMA buffer is zeroed so MAX98357A output remains low.
 - Every 10 seconds serial output reports queue depth, overflow, dropped-frame,
   underrun and maximum queue-wait counters under the `AUDIO_PIPELINE` prefix.
+- The same interval reports acoustic profile, frame, clipping, reference
+  overflow/underflow and processing-failure counters.
 
 The 40 ms interruption value is an implementation bound, not measured
-speaker-stop latency. Target-board audio and serial evidence remain required.
+speaker-stop latency. `VALIDATED_AEC` remains false until target-board raw,
+reference and processed recordings pass the EV-05 acceptance thresholds.
 
 ## Protocol
 

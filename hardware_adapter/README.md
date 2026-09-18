@@ -20,6 +20,31 @@ python -B hardware_adapter/tests/test_hal_contract.py
 The fake resource values prove the schema only; they are not target ESP32
 measurements.
 
+## Acoustic validation
+
+`hal/acoustic_profile.py` mirrors the versioned EV-05 gain, clipping and
+playback-reference conversion contract for host tests. The firmware uses the
+ESP-SR implementation documented in
+[`docs/acoustic-frontend.md`](../docs/acoustic-frontend.md).
+
+After capturing raw and processed 16 kHz mono WAVs from the physical target,
+archive and evaluate each required scenario with:
+
+```bash
+python -B services/companion-server/scripts/collect_ev05_acoustic_baseline.py \
+  --scenario echo_only \
+  --raw-wav /path/to/raw.wav \
+  --processed-wav /path/to/processed.wav \
+  --reference-wav /path/to/reference.wav \
+  --hardware-id DNESP32S3-01 \
+  --firmware-commit "$(git rev-parse HEAD)" \
+  --output-dir docs/validation/ev05-acoustic-YYYYMMDD \
+  --confirm-target-capture
+```
+
+The collector refuses to label input as target evidence without the explicit
+confirmation flag.
+
 ## Portable carrier MVP
 
 `portable_voice_client` turns a Linux/macOS computer with a microphone and
